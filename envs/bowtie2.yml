@@ -1,0 +1,6 @@
+name: nanocut-bowtie2
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bowtie2=2.5.4

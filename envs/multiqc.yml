@@ -1,0 +1,6 @@
+name: nanocut-multiqc
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - multiqc=1.25.2

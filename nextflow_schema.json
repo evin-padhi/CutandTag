@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://example.org/bulk-nanocut-tag/nextflow_schema.json",
+  "title": "Bulk nano-CUT&Tag Nextflow pipeline parameters",
+  "description": "Validated inputs and analysis settings for the manifest-driven bulk nano-CUT&Tag workflow.",
+  "type": "object",
+  "properties": {
+    "input": {
+      "type": "string",
+      "format": "file-path",
+      "description": "CSV manifest with one row per barcode-derived sample."
+    },
+    "fasta": {
+      "type": "string",
+      "format": "file-path",
+      "description": "Reference genome FASTA used to build a Bowtie2 index when --bowtie2_index is omitted."
+    },
+    "bowtie2_index": {
+      "type": "string",
+      "format": "file-path",
+      "description": "Optional Bowtie2 index prefix; takes precedence over building an index from --fasta."
+    },
+    "outdir": {
+      "type": "string",
+      "format": "directory-path",
+      "default": "results",
+      "description": "Directory for pipeline results."
+    },
+    "blacklist": {
+      "type": "string",
+      "format": "file-path",
+      "description": "Optional BED blacklist removed from final broad peaks and motif inputs."
+    },
+    "gtf": {
+      "type": "string",
+      "format": "file-path",
+      "description": "Optional GTF used to derive strand-aware transcription start sites."
+    },
+    "tss_bed": {
+      "type": "string",
+      "format": "file-path",
+      "description": "Optional precomputed strand-aware TSS BED, used instead of --gtf."
+    },
+    "motif_db": {
+      "type": "string",
+      "format": "file-path",
+      "description": "Optional MEME-format motif database enabling motif analysis."
+    },
+    "barcode_mismatches": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Maximum I2 barcode Hamming distance; it must be less than the manifest barcode length."
+    },
+    "allow_empty": {
+      "type": "boolean",
+      "default": false,
+      "description": "Permit zero-read derived samples for diagnostic runs."
+    },
+    "min_mapq": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 5,
+      "description": "Minimum MAPQ for filtered BAM, coverage, and fragment-based QC."
+    },
+    "macs_genome_size": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ],
+      "description": "Required MACS2 genome size shortcut (for example hs) or effective genome-size integer."
+    },
+    "macs_llocal": {
+      "type": "integer",
+      "const": 100000,
+      "default": 100000,
+      "description": "MACS2 local lambda window for NanoScope-compatible peak calls."
+    },
+    "macs_keep_dup": {
+      "type": "integer",
+      "const": 1,
+      "default": 1,
+      "description": "MACS2 duplicate retention setting for NanoScope-compatible peak calls."
+    },
+    "macs_broad_cutoff": {
+      "type": "number",
+      "const": 0.1,
+      "default": 0.1,
+      "description": "MACS2 broad-peak cutoff."
+    },
+    "macs_max_gap": {
+      "type": "integer",
+      "const": 1000,
+      "default": 1000,
+      "description": "Maximum gap for MACS2 broad-peak merging."
+    },
+    "motif_use_narrow_peaks": {
+      "type": "boolean",
+      "default": true,
+      "description": "Use optional controlled narrow-peak summits for motif QC; broad peaks remain the primary result."
+    },
+    "motif_window": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 200,
+      "description": "Total width in base pairs of the reference-bounded motif sequence window."
+    }
+  },
+  "required": ["input", "macs_genome_size"],
+  "allOf": [
+    {
+      "anyOf": [
+        {
+          "required": ["fasta"],
+          "properties": {
+            "fasta": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "required": ["bowtie2_index"],
+          "properties": {
+            "bowtie2_index": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "additionalProperties": true
+}

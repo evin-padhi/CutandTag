@@ -1,0 +1,8 @@
+# AME 5.5.7 results
+# command: ame --control background.fa motifs.meme peaks.fa
+# motif_qc_complete_database=true
+rank	motif_DB	motif_ID	motif_Alt_ID	consensus	p-value	adj_p-value	E-value	score	pos	neg	enrichment
+4	JASPAR2026	MA0139.1	CTCF	CCGCGNGGNGGCAG	0.01	0.01	0.04	2.0	4	4	2.5
+3	JASPAR2026	MA0476.1	FOS	TGASTCA	0.0005	0.001	0.004	6.0	4	4	7.0
+1	JASPAR2026	MA0139.2	CTCF	CCGCGNGGNGGCAG	0.001	0.002	0.008	4.5	4	4	5.0
+2	JASPAR2026	MA0080.5	SPI1	GGAA	0.1	0.2	0.8	0.5	4	4	1.1

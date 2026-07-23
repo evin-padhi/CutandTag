@@ -1,0 +1,13 @@
+sample_id,library_id,input_group,barcode,assay_target,is_control,control_id,expected_motif,r1,r2,i2
+NX702_IgG,NX702,25K,TATAGCCT,IgG,true,,,data/NX702_R1.fastq.gz,data/NX702_R2.fastq.gz,data/NX702_I2.fastq.gz
+NX702_CTCF,NX702,25K,ATAGAGGC,CTCF,false,NX702_IgG,CTCF,data/NX702_R1.fastq.gz,data/NX702_R2.fastq.gz,data/NX702_I2.fastq.gz
+NX703_IgG,NX703,50K,TATAGCCT,IgG,true,,,data/NX703_R1.fastq.gz,data/NX703_R2.fastq.gz,data/NX703_I2.fastq.gz
+NX703_CTCF,NX703,50K,ATAGAGGC,CTCF,false,NX703_IgG,CTCF,data/NX703_R1.fastq.gz,data/NX703_R2.fastq.gz,data/NX703_I2.fastq.gz
+NX701_IgG,NX701,100K,TATAGCCT,IgG,true,,,data/NX701_R1.fastq.gz,data/NX701_R2.fastq.gz,data/NX701_I2.fastq.gz
+NX701_CTCF,NX701,100K,ATAGAGGC,CTCF,false,NX701_IgG,CTCF,data/NX701_R1.fastq.gz,data/NX701_R2.fastq.gz,data/NX701_I2.fastq.gz
+NX704_GATA1,NX704,25K,TATAGCCT,GATA1,false,NX702_IgG,GATA1,data/NX704_R1.fastq.gz,data/NX704_R2.fastq.gz,data/NX704_I2.fastq.gz
+NX704_RUNX1,NX704,25K,ATAGAGGC,RUNX1,false,NX702_IgG,RUNX1,data/NX704_R1.fastq.gz,data/NX704_R2.fastq.gz,data/NX704_I2.fastq.gz
+NX705_GATA1,NX705,50K,TATAGCCT,GATA1,false,NX703_IgG,GATA1,data/NX705_R1.fastq.gz,data/NX705_R2.fastq.gz,data/NX705_I2.fastq.gz
+NX705_RUNX1,NX705,50K,ATAGAGGC,RUNX1,false,NX703_IgG,RUNX1,data/NX705_R1.fastq.gz,data/NX705_R2.fastq.gz,data/NX705_I2.fastq.gz
+NX706_GATA1,NX706,100K,TATAGCCT,GATA1,false,NX701_IgG,GATA1,data/NX706_R1.fastq.gz,data/NX706_R2.fastq.gz,data/NX706_I2.fastq.gz
+NX706_RUNX1,NX706,100K,ATAGAGGC,RUNX1,false,NX701_IgG,RUNX1,data/NX706_R1.fastq.gz,data/NX706_R2.fastq.gz,data/NX706_I2.fastq.gz

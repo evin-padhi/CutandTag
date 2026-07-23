@@ -1,0 +1,3 @@
+sample_id,library_id,input_group,barcode,assay_target,is_control,control_id,expected_motif,r1,r2,i2
+MINI_IgG,MINI,mini,TATAGCCT,IgG,true,,,reads_R1.fastq,reads_R2.fastq,reads_I2.fastq
+MINI_CTCF,MINI,mini,ATAGAGGC,CTCF,false,MINI_IgG,CTCF,reads_R1.fastq,reads_R2.fastq,reads_I2.fastq

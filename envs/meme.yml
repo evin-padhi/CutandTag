@@ -1,0 +1,6 @@
+name: nanocut-meme
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - meme=5.5.7

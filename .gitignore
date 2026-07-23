@@ -1,0 +1,25 @@
+# Nextflow task state and local dependency caches
+.nextflow/
+.nextflow.*
+.nextflow-conda/
+work/
+
+# Default and test result directories
+results/
+results-*/
+
+# Packaged release artifacts
+outputs/*.tar.gz
+
+# Python and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editors and operating systems
+.DS_Store
+*.swp
+*~
+

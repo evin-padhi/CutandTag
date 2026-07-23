@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "$(dirname "$0")/fake_bio_tool.py" --fake-tool fimo "$@"

@@ -1,0 +1,7 @@
+# FIMO 5.5.7
+# pattern name	pattern accession	sequence name	start	stop	strand	score	p-value	q-value	matched sequence
+motif_id	motif_alt_id	sequence_name	start	stop	strand	score	p-value	q-value	matched_sequence
+MA0139.1	CTCF	peak_1	96	105	+	12.1	0.0001	0.001	CCGCGCGGCG
+MA0139.2	CTCF	peak_1	96	105	-	11.5	0.0002	0.002	CCGCGCGGCG
+MA0139.2	CTCF	peak_2	1	10	+	5.0	0.02	0.1	CCGCGCGGCG
+MA0080.5	SPI1	peak_3	100	103	+	3.0	0.03	0.1	GGAA
