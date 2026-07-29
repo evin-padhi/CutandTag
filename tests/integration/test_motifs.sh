@@ -48,6 +48,9 @@ checks = {
     "sequence preparation uses the pinned BEDTools environment and image":
         'conda "${projectDir}/envs/bedtools.yml"' in prepare
         and f"container '{bedtools_container}'" in prepare,
+    "optional blacklist staging does not declare zero-based path arity":
+        "arity: '0..1'" not in prepare
+        and "stageAs: 'blacklist/regions*.bed'" in prepare,
     "sequence preparation validates a positive integral total window":
         "validateMotifWindow" in prepare
         and "signum() <= 0" in prepare

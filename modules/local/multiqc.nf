@@ -435,13 +435,13 @@ process MULTIQC {
         pattern: 'combined_target_qc.tsv'
 
     input:
-    path(fastqc_files, stageAs: 'fastqc??/*', arity: '0..*')
-    path(demux_custom_files, stageAs: 'demux??/*', arity: '0..*')
-    path(library_custom_files, stageAs: 'library??/*', arity: '0..*')
-    path(insert_size_files, stageAs: 'insert??/*', arity: '0..*')
-    path(peak_qc_files, stageAs: 'peak_qc??/*', arity: '0..*')
-    path(motif_metric_files, stageAs: 'motif??/*', arity: '0..*')
-    path(tss_status_files, stageAs: 'tss??/*', arity: '0..*')
+    path fastqc_files, stageAs: 'fastqc??/*'
+    path demux_custom_files, stageAs: 'demux??/*'
+    path library_custom_files, stageAs: 'library??/*'
+    path insert_size_files, stageAs: 'insert??/*'
+    path peak_qc_files, stageAs: 'peak_qc??/*'
+    path motif_metric_files, stageAs: 'motif??/*'
+    path tss_status_files, stageAs: 'tss??/*'
     env annotation_status
 
     output:
