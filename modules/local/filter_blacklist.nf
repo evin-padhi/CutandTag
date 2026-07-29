@@ -11,7 +11,7 @@ process FILTER_BLACKLIST {
 
     input:
     tuple val(meta), path(raw_broad_peak, stageAs: 'raw.broadPeak')
-    path(blacklist_files, stageAs: 'blacklist/regions*.bed', arity: '0..1')
+    path blacklist_files, stageAs: 'blacklist/regions*.bed'
 
     output:
     tuple val(meta), path("final.broadPeak"), emit: peaks

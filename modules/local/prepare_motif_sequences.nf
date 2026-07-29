@@ -57,7 +57,7 @@ process PREPARE_MOTIF_SEQUENCES {
         val(anchor_mode),
         path(final_peaks, stageAs: 'final.peaks.bed')
     path fasta, stageAs: 'reference.fa'
-    path(blacklist_files, stageAs: 'blacklist/regions*.bed', arity: '0..1')
+    path blacklist_files, stageAs: 'blacklist/regions*.bed'
     val motif_window
 
     output:

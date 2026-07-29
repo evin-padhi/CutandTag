@@ -111,8 +111,8 @@ checks = {
     "blacklist filtering uses the pinned BEDTools environment and image":
         'conda "${projectDir}/envs/bedtools.yml"' in blacklist
         and f"container '{bedtools_container}'" in blacklist,
-    "blacklist input permits zero or one staged file":
-        "arity: '0..1'" in blacklist
+    "blacklist input accepts the collected optional path without invalid arity":
+        "arity: '0..1'" not in blacklist
         and "stageAs: 'blacklist/regions*.bed'" in blacklist,
     "blacklist filtering uses fixed paths and inverse intersection":
         'bedtools intersect' in blacklist

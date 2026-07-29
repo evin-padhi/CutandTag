@@ -153,6 +153,17 @@ checks = {
     "MultiQC uses the pinned project environment and image":
         'conda "${projectDir}/envs/multiqc.yml"' in multiqc
         and f"container '{multiqc_image}'" in multiqc,
+    "optional MultiQC collections do not declare zero-based path arity":
+        "arity: '0..*'" not in multiqc
+        and all(stage in multiqc for stage in (
+            "stageAs: 'fastqc??/*'",
+            "stageAs: 'demux??/*'",
+            "stageAs: 'library??/*'",
+            "stageAs: 'insert??/*'",
+            "stageAs: 'peak_qc??/*'",
+            "stageAs: 'motif??/*'",
+            "stageAs: 'tss??/*'",
+        )),
     "custom report content covers demux, FRiP, peak count, motif, and library QC":
         all(token in multiqc for token in (
             "nanocut_demultiplex",
