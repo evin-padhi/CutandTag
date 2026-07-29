@@ -12,7 +12,7 @@ import tempfile
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 
 
 class PeakQcError(ValueError):
@@ -144,23 +144,20 @@ def _normalise_peaks(peaks: Iterable[Peak | Sequence[object]]) -> list[Peak]:
 
 def _normalise_fragments(
     fragments: Iterable[Fragment | Sequence[object]],
-) -> list[Fragment]:
-    return [
+) -> Iterator[Fragment]:
+    return (
         _coerce_fragment(record, index) for index, record in enumerate(fragments, start=1)
-    ]
+    )
 
 
-def _unique_fragments(fragments: Iterable[Fragment]) -> list[Fragment]:
+def _unique_fragments(fragments: Iterable[Fragment]) -> Iterator[Fragment]:
     """Keep one BEDPE record per required fragment name, preserving input order."""
 
-    unique: list[Fragment] = []
-    seen: set[tuple[object, ...]] = set()
+    seen: set[str] = set()
     for fragment in fragments:
-        key: tuple[object, ...] = ("name", fragment.name)
-        if key not in seen:
-            seen.add(key)
-            unique.append(fragment)
-    return unique
+        if fragment.name not in seen:
+            seen.add(fragment.name)
+            yield fragment
 
 
 def _quantile(values: list[int] | list[float], quantile: float) -> float | None:
@@ -266,14 +263,16 @@ def _overlapping_peak_indexes(
 
 
 def _calculate_fragment_overlaps(
-    fragments: list[Fragment], peaks: list[Peak]
+    fragments: Iterable[Fragment], peaks: list[Peak]
 ) -> tuple[dict[str, float | int], list[int]]:
     """Compute FRiP and every per-peak count in one fragment traversal."""
 
     index = _index_peaks(peaks)
     counts = [0] * len(peaks)
+    total_fragments = 0
     fragments_in_peaks = 0
     for fragment in fragments:
+        total_fragments += 1
         hit_peak_indexes: set[int] = set()
         for chrom, start, end in _fragment_intervals(fragment):
             hit_peak_indexes.update(_overlapping_peak_indexes(index, chrom, start, end))
@@ -281,12 +280,13 @@ def _calculate_fragment_overlaps(
             fragments_in_peaks += 1
             for peak_index in hit_peak_indexes:
                 counts[peak_index] += 1
-    total = len(fragments)
     return (
         {
-            "total_fragments": total,
+            "total_fragments": total_fragments,
             "fragments_in_peaks": fragments_in_peaks,
-            "frip": fragments_in_peaks / total if total else 0.0,
+            "frip": (
+                fragments_in_peaks / total_fragments if total_fragments else 0.0
+            ),
         },
         counts,
     )
@@ -355,20 +355,31 @@ def read_peaks(path: Path) -> list[Peak]:
 def read_fragments(path: Path) -> list[Fragment]:
     """Read name-collated BEDPE fragments, accepting comments and an empty file."""
 
-    records: list[Fragment] = []
+    return list(iter_fragments(path))
+
+
+def iter_fragments(path: Path) -> Iterator[Fragment]:
+    """Yield validated BEDPE fragments without materializing the input file."""
+
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        handle = path.open(encoding="utf-8")
     except OSError as error:
         raise PeakQcError(f"cannot read fragments file {path}: {error}") from error
-    for line_number, line in enumerate(lines, start=1):
-        if not line or line.startswith("#") or line.startswith("track") or line.startswith("browser"):
-            continue
-        fields = line.split("\t")
-        try:
-            records.append(_coerce_fragment(fields, line_number))
-        except PeakQcError as error:
-            raise PeakQcError(f"{path}:{line_number}: {error}") from error
-    return records
+    with handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.rstrip("\r\n")
+            if (
+                not line
+                or line.startswith("#")
+                or line.startswith("track")
+                or line.startswith("browser")
+            ):
+                continue
+            fields = line.split("\t")
+            try:
+                yield _coerce_fragment(fields, line_number)
+            except PeakQcError as error:
+                raise PeakQcError(f"{path}:{line_number}: {error}") from error
 
 
 def _output_paths(prefix: Path) -> dict[str, Path]:
@@ -385,7 +396,7 @@ def _format_metric(value: float | int | None) -> str:
 
 
 def _render_outputs(
-    sample_id: str, peaks: list[Peak], fragments: list[Fragment]
+    sample_id: str, peaks: list[Peak], fragments: Iterable[Fragment]
 ) -> dict[str, str]:
     summary = summarize_peaks(peaks)
     frip, counts = _calculate_fragment_overlaps(fragments, peaks)
@@ -483,7 +494,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     try:
         peaks = read_peaks(arguments.peaks)
-        fragments = read_fragments(arguments.fragments)
+        fragments = iter_fragments(arguments.fragments)
         write_qc_outputs(arguments.output_prefix, arguments.sample_id, peaks, fragments)
     except PeakQcError as error:
         parser.error(str(error))
