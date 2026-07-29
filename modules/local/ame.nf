@@ -52,14 +52,16 @@ process AME {
                 'foreground peaks exist but shuffled background FASTA is empty' >&2
             exit 2
         fi
-        ame --oc "ame" \
+        mkdir -p "ame"
+        ame --text \
             --control "background.fa" \
             --method fisher \
             --scoring avg \
             --evalue-report-threshold 1e300 \
             "foreground.fa" \
             "motifs.meme" \
-            > "ame.log" 2>&1
+            > "ame/ame.tsv" \
+            2> "ame.log"
         if [[ ! -f "ame/ame.tsv" ]]; then
             printf '%s\\n' 'AME completed without ame/ame.tsv' >&2
             exit 2

@@ -97,16 +97,21 @@ checks = {
     "AME uses the pinned MEME environment and image":
         'conda "${projectDir}/envs/meme.yml"' in ame
         and f"container '{meme_container}'" in ame,
-    "AME uses a separate shuffled control and requests the complete database":
-        'ame --oc "ame"' in ame
+    "AME uses template-free TSV output with a separate shuffled control":
+        'mkdir -p "ame"' in ame
+        and "ame --text" in ame
+        and 'ame --oc "ame"' not in ame
         and '--control "background.fa"' in ame
         and "--method fisher" in ame
         and "--scoring avg" in ame
         and "--evalue-report-threshold 1e300" in ame
+        and '> "ame/ame.tsv"' in ame
+        and '2> "ame.log"' in ame
         and "--pvalue-report-threshold" not in ame,
     "AME complete-database provenance is added only after a successful run":
         "# motif_qc_complete_database=true" in ame
-        and ame.index('ame --oc "ame"') < ame.index("# motif_qc_complete_database=true"),
+        and "ame --text" in ame
+        and ame.index("ame --text") < ame.index("# motif_qc_complete_database=true"),
     "AME records empty peaks without invoking the tool":
         'if [[ ! -s "foreground.fa" ]]' in ame
         and 'status\\\\tno_peaks' in ame,
