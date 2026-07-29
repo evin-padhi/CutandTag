@@ -221,8 +221,10 @@ if not isinstance(duplicate_json, dict):
 duplicate_total = require_non_negative_number(duplicate_json, "DUPLICATE TOTAL")
 denominator_key = "EXAMINED" if "EXAMINED" in duplicate_json else "READ"
 examined_reads = require_non_negative_number(duplicate_json, denominator_key)
-estimated_library_size = require_non_negative_number(
-    duplicate_json, "ESTIMATED LIBRARY SIZE"
+estimated_library_size = (
+    require_non_negative_number(duplicate_json, "ESTIMATED LIBRARY SIZE")
+    if "ESTIMATED LIBRARY SIZE" in duplicate_json
+    else None
 )
 if duplicate_total > examined_reads:
     raise SystemExit("markdup DUPLICATE TOTAL exceeds examined/read count")
