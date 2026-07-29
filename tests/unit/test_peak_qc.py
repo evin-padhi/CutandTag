@@ -123,6 +123,43 @@ class PeakQcUnitTests(unittest.TestCase):
             "non-overlapping fragments and peaks must not trigger an all-pairs scan",
         )
 
+    def test_write_qc_outputs_processes_fragments_incrementally(self):
+        processed_names = []
+
+        def guarded_fragments():
+            yield ("chr1", 10, 12, "chr1", 18, 20, "fragment_one")
+            if processed_names != ["fragment_one"]:
+                raise AssertionError(
+                    "fragment stream was consumed before overlap processing"
+                )
+            yield ("chr1", 30, 32, "chr1", 38, 40, "fragment_two")
+
+        original_fragment_intervals = peak_qc._fragment_intervals
+
+        def record_processed_fragment(fragment):
+            processed_names.append(fragment.name)
+            return original_fragment_intervals(fragment)
+
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / "streamed"
+            with patch.object(
+                peak_qc,
+                "_fragment_intervals",
+                side_effect=record_processed_fragment,
+            ):
+                write_qc_outputs(
+                    prefix,
+                    "sample",
+                    [("chr1", 0, 50, "peak_a")],
+                    guarded_fragments(),
+                )
+
+            payload = json.loads(Path(f"{prefix}.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(processed_names, ["fragment_one", "fragment_two"])
+        self.assertEqual(payload["total_fragments"], 2)
+        self.assertEqual(payload["fragments_in_peaks"], 2)
+
     def test_broadpeak_score_and_signal_value_are_summarized(self):
         peaks = read_peaks(ROOT / "tests" / "data" / "qc" / "scored.broadPeak")
         summary = summarize_peaks(peaks)
