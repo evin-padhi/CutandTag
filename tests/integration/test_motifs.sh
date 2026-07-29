@@ -221,12 +221,21 @@ gc_match = re.search(
 )
 if not window_match or not gc_match:
     raise SystemExit("FAIL: could not extract motif window/GC matching programs")
+
+def render_nextflow_gstring(text):
+    return (
+        text
+        .replace("\\$", "$")
+        .replace("\\\\t", "\\t")
+        .replace("\\\\n", "\\n")
+    )
+
 (tmp / "make_windows.awk").write_text(
-    window_match.group(1).replace("\\$", "$") + "\n",
+    render_nextflow_gstring(window_match.group(1)) + "\n",
     encoding="utf-8",
 )
 (tmp / "match_gc.awk").write_text(
-    gc_match.group(1).replace("\\$", "$") + "\n",
+    render_nextflow_gstring(gc_match.group(1)) + "\n",
     encoding="utf-8",
 )
 
@@ -388,8 +397,8 @@ workflow {
         Channel.of(file('${tmp_dir}/runtime/reference.fa')),
         Channel.empty(),
         Channel.of(file('${tmp_dir}/runtime/motifs.meme')),
-        200,
-        false
+        Channel.value(200),
+        Channel.value(false)
     )
 }
 EOF

@@ -7,7 +7,8 @@ process BOWTIE2_BUILD {
 
     publishDir "${params.outdir}/pipeline_info/bowtie2_index",
         mode: 'copy',
-        overwrite: true
+        overwrite: true,
+        saveAs: { filename -> filename.tokenize('/').last() }
 
     input:
     tuple val(reference_meta), val(reference_mode), path(reference_inputs, stageAs: 'reference_input/*')
@@ -26,13 +27,15 @@ process BOWTIE2_BUILD {
     def prepareCommand
     if (reference_mode == 'fasta') {
         prepareCommand = '''
-        reference_count=$(find "reference_input" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+        reference_count=$(find "reference_input" -mindepth 1 -maxdepth 1 \
+            ! -type d | wc -l | tr -d '[:space:]')
         if [[ "${reference_count}" -ne 1 ]]; then
             printf 'FASTA reference mode requires exactly one input; found %s\n' \
                 "${reference_count}" >&2
             exit 1
         fi
-        reference_file=$(find "reference_input" -maxdepth 1 -type f -print -quit)
+        reference_file=$(find "reference_input" -mindepth 1 -maxdepth 1 \
+            ! -type d -print -quit)
         bowtie2-build \
             --threads "${threads}" \
             "${reference_file}" \
@@ -68,7 +71,8 @@ process BOWTIE2_BUILD {
                 exit 1
             fi
             cp -- "${index_file}" "${destination}"
-        done < <(find "reference_input" -maxdepth 1 -type f -print0)
+        done < <(find "reference_input" -mindepth 1 -maxdepth 1 \
+            ! -type d -print0)
 
         small_count=$(find "bt2_index" -maxdepth 1 -type f -name 'reference*.bt2' | wc -l | tr -d '[:space:]')
         large_count=$(find "bt2_index" -maxdepth 1 -type f -name 'reference*.bt2l' | wc -l | tr -d '[:space:]')

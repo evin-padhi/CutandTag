@@ -1,3 +1,26 @@
+def validateBroadMacsGenomeSize(rawValue) {
+    def text = rawValue?.toString()
+    if (text == null || text.isEmpty()) {
+        throw new IllegalArgumentException(
+            "macs_genome_size must be a MACS shortcut or a positive integer"
+        )
+    }
+    if (text ==~ /[0-9]+/) {
+        if (new BigInteger(text).signum() <= 0) {
+            throw new IllegalArgumentException(
+                "macs_genome_size integer must be positive, got ${text}"
+            )
+        }
+        return text
+    }
+    if (!(text ==~ /[A-Za-z][A-Za-z0-9._-]*/)) {
+        throw new IllegalArgumentException(
+            "macs_genome_size shortcut contains unsafe characters: ${text}"
+        )
+    }
+    text
+}
+
 process MACS2_BROAD {
     tag "${meta.sample_id} vs ${control_meta.sample_id}"
     label 'process_heavy'
@@ -28,29 +51,7 @@ process MACS2_BROAD {
     tuple val(meta), path("macs2_broad_versions.yml"), emit: versions
 
     script:
-    def validateMacsGenomeSize = { rawValue ->
-        def text = rawValue?.toString()
-        if (text == null || text.isEmpty()) {
-            throw new IllegalArgumentException(
-                "macs_genome_size must be a MACS shortcut or a positive integer"
-            )
-        }
-        if (text ==~ /[0-9]+/) {
-            if (new BigInteger(text).signum() <= 0) {
-                throw new IllegalArgumentException(
-                    "macs_genome_size integer must be positive, got ${text}"
-                )
-            }
-            return text
-        }
-        if (!(text ==~ /[A-Za-z][A-Za-z0-9._-]*/)) {
-            throw new IllegalArgumentException(
-                "macs_genome_size shortcut contains unsafe characters: ${text}"
-            )
-        }
-        text
-    }
-    def genomeSize = validateMacsGenomeSize(macs_genome_size)
+    def genomeSize = validateBroadMacsGenomeSize(macs_genome_size)
 
     """
     set -euo pipefail

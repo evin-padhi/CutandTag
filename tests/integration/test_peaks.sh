@@ -58,10 +58,10 @@ checks = {
             '--broad',
         )),
     "broad calling validates genome size before command interpolation":
-        "validateMacsGenomeSize" in broad
+        "validateBroadMacsGenomeSize" in broad
         and "new BigInteger(text).signum() <= 0" in broad
         and "/[A-Za-z][A-Za-z0-9._-]*/" in broad
-        and broad.index("validateMacsGenomeSize") < broad.index("macs2 callpeak"),
+        and broad.index("validateBroadMacsGenomeSize") < broad.index("macs2 callpeak"),
     "broad calling materializes valid empty output files after MACS2 succeeds":
         'touch "sample_peaks.broadPeak"' in broad
         and 'touch "sample_peaks.gappedPeak"' in broad
@@ -139,9 +139,9 @@ checks = {
     "only non-controls become target peak calls":
         "isControlMeta" in peaks
         and "!isControlMeta(meta)" in peaks,
-    "controls are collected once into a reusable keyed map":
-        "collect(flat: false)" in peaks
-        and "controlsBySampleId" in peaks,
+    "controls are reduced once into a reusable keyed map":
+        ".reduce([rows: []])" in peaks
+        and "controlsBySampleId(holder.rows)" in peaks,
     "targets are paired to analysis controls by control_id":
         ".combine(controls_by_id)" in peaks
         and "meta.control_id" in peaks,
@@ -150,8 +150,9 @@ checks = {
         and "referenced by target" in peaks,
     "self-control calls are explicitly rejected":
         "cannot use itself as an IgG control" in peaks,
-    "an empty blacklist queue is collected into a reusable value":
-        "blacklist.collect(flat: false)" in peaks,
+    "an empty blacklist queue is reduced into a reusable value":
+        ".reduce([files: []])" in peaks
+        and ".map { holder -> holder.files }" in peaks,
     "broad peaks always flow through optional blacklist finalization":
         "FILTER_BLACKLIST(MACS2_BROAD.out.peaks" in peaks,
     "narrow calls receive the exact validated enable value":
@@ -339,7 +340,12 @@ workflow {
             file('${tmp_dir}/runtime/input/TARGET.bam.bai')
         )
     )
-    PEAKS(analysis_bams, Channel.empty(), 'hs', true)
+    PEAKS(
+        analysis_bams,
+        Channel.empty(),
+        Channel.value('hs'),
+        Channel.value(true)
+    )
 }
 EOF
 
@@ -390,7 +396,12 @@ workflow {
             file('${tmp_dir}/runtime/input/TARGET.bam.bai')
         )
     )
-    PEAKS(analysis_bams, Channel.empty(), '1000', false)
+    PEAKS(
+        analysis_bams,
+        Channel.empty(),
+        Channel.value('1000'),
+        Channel.value(false)
+    )
 }
 EOF
 
@@ -421,7 +432,12 @@ workflow {
             file('${tmp_dir}/runtime/input/TARGET.bam.bai')
         )
     )
-    PEAKS(analysis_bams, Channel.empty(), '1000', false)
+    PEAKS(
+        analysis_bams,
+        Channel.empty(),
+        Channel.value('1000'),
+        Channel.value(false)
+    )
 }
 EOF
 

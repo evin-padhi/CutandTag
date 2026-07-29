@@ -442,7 +442,7 @@ process MULTIQC {
     path peak_qc_files, stageAs: 'peak_qc??/*'
     path motif_metric_files, stageAs: 'motif??/*'
     path tss_status_files, stageAs: 'tss??/*'
-    env annotation_status
+    val annotation_status
 
     output:
     path("combined_target_qc.tsv"), emit: combined_summary
@@ -452,6 +452,20 @@ process MULTIQC {
     path("multiqc_versions.yml"), emit: versions
 
     script:
+    def safeAnnotationStatuses = [
+        'skipped_no_annotation',
+        'computed_bed',
+        'computed_gtf',
+    ]
+    def annotationStatus = annotation_status.toString()
+    if (!(annotationStatus in safeAnnotationStatuses)) {
+        throw new IllegalArgumentException(
+            "unexpected annotation status: ${annotationStatus}"
+        )
+    }
+    """
+    export annotation_status="${annotationStatus}"
+    """ +
     '''
     set -euo pipefail
     mkdir -p "multiqc_custom_content"

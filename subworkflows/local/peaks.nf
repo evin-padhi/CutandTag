@@ -100,8 +100,10 @@ workflow PEAKS {
 
     controls_by_id = safe_bams
         .filter { meta, bam, bai -> isControlMeta(meta) }
-        .collect(flat: false)
-        .map { control_rows -> controlsBySampleId(control_rows) }
+        .reduce([rows: []]) { holder, control_row ->
+            [rows: holder.rows + [control_row]]
+        }
+        .map { holder -> controlsBySampleId(holder.rows) }
 
     target_bams = safe_bams.filter {
         meta, bam, bai -> !isControlMeta(meta)
@@ -148,20 +150,22 @@ workflow PEAKS {
     }
 
     /*
-     * collect(flat: false) turns either Channel.empty() or a one-path queue
-     * into a reusable value containing [] or [path]. FILTER_BLACKLIST can
+     * A seeded reduction turns either Channel.empty() or a one-path queue
+     * into a reusable holder containing [] or [path]. FILTER_BLACKLIST can
      * therefore finalize every broadPeak without waiting on an empty queue.
      */
-    reusable_blacklist = blacklist.collect(flat: false)
-        .map { blacklist_rows ->
-            if (blacklist_rows.size() > 1) {
+    reusable_blacklist = blacklist
+        .reduce([files: []]) { holder, blacklist_path ->
+            def files = holder.files + [blacklist_path]
+            if (files.size() > 1) {
                 throw new IllegalArgumentException(
                     "PEAKS accepts at most one blacklist, got " +
-                    blacklist_rows.size()
+                    files.size()
                 )
             }
-            blacklist_rows
+            [files: files]
         }
+        .map { holder -> holder.files }
 
     MACS2_BROAD(paired_bams, safe_genome_size)
     MACS2_NARROW(paired_bams, safe_genome_size, narrow_enabled)

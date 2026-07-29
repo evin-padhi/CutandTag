@@ -7,7 +7,8 @@ process FASTQC {
 
     publishDir "${params.outdir}/fastqc/${meta.sample_id}",
         mode: 'copy',
-        overwrite: true
+        overwrite: true,
+        saveAs: { filename -> filename.tokenize('/').last() }
 
     input:
     tuple val(meta), path(r1), path(r2)
