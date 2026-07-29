@@ -41,6 +41,9 @@ motifs = (root / "subworkflows/local/motifs.nf").read_text()
 
 meme_container = "quay.io/biocontainers/meme:5.5.7--pl5321h1ca524f_3"
 bedtools_container = "quay.io/biocontainers/bedtools:2.31.1--hf5e1c6e_2"
+script_start = prepare.index('    """\n    set -euo pipefail')
+script_end = prepare.rindex('    """')
+interpolated_script = prepare[script_start:script_end]
 
 checks = {
     "PREPARE_MOTIF_SEQUENCES process is declared":
@@ -51,6 +54,8 @@ checks = {
     "optional blacklist staging does not declare zero-based path arity":
         "arity: '0..1'" not in prepare
         and "stageAs: 'blacklist/regions*.bed'" in prepare,
+    "Groovy-interpolated shell escapes every literal dollar sign":
+        re.search(r"(?<!\\)\$(?!\{)", interpolated_script) is None,
     "sequence preparation validates a positive integral total window":
         "validateMotifWindow" in prepare
         and "signum() <= 0" in prepare
