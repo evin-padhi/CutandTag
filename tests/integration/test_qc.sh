@@ -477,6 +477,25 @@ grep -F $'TARGET\t200\t1' \
   "$tmp_dir/library_formatter/TARGET.insert_size_distribution.tsv" >/dev/null
 
 cat > "$tmp_dir/library_formatter/duplicate_metrics.json" <<'EOF'
+{"READ": 100, "DUPLICATE TOTAL": 20}
+EOF
+(
+  cd "$tmp_dir/library_formatter"
+  python3 "$repo_root/.library_qc_formatter.test.py" \
+    TARGET no-estimate.library_qc.tsv no-estimate.insert.tsv
+)
+python3 - "$tmp_dir/library_formatter/no-estimate.library_qc.tsv" <<'PY'
+import csv
+import sys
+
+with open(sys.argv[1], encoding="utf-8", newline="") as handle:
+    row = next(csv.DictReader(handle, delimiter="\t"))
+assert row["estimated_library_size"] == ""
+assert float(row["duplicate_total"]) == 20.0
+assert float(row["duplicate_percent"]) == 20.0
+PY
+
+cat > "$tmp_dir/library_formatter/duplicate_metrics.json" <<'EOF'
 {"READ": 100, "ESTIMATED LIBRARY SIZE": 40}
 EOF
 if (
