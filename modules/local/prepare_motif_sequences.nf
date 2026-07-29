@@ -122,7 +122,7 @@ process PREPARE_MOTIF_SEQUENCES {
                 print name, sequence_length
             }
             header = substr(\$0, 2)
-            sub(/[[:space:]].*$/, "", header)
+            sub(/[[:space:]].*\$/, "", header)
             if (header == "") {
                 print "reference FASTA contains a blank sequence name" > "/dev/stderr"
                 exit 2
@@ -155,32 +155,32 @@ BEGIN {
     count = 0
 }
 FNR == NR {
-    if (NF != 2 || $2 !~ /^[0-9]+$/ || $2 <= 0) {
+    if (NF != 2 || \$2 !~ /^[0-9]+\$/ || \$2 <= 0) {
         print "invalid reference genome-size row " FNR > "/dev/stderr"
         exit 2
     }
-    chromosome_size[$1] = $2
+    chromosome_size[\$1] = \$2
     next
 }
-/^[[:space:]]*($|#)/ {
+/^[[:space:]]*(\$|#)/ {
     next
 }
 {
-    if (NF < 3 || !($1 in chromosome_size)) {
+    if (NF < 3 || !(\$1 in chromosome_size)) {
         print "motif anchor row " FNR " has an unknown chromosome" > "/dev/stderr"
         exit 2
     }
-    if ($2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ ||
-        $2 < 0 || $3 <= $2 || $3 > chromosome_size[$1]) {
+    if (\$2 !~ /^[0-9]+\$/ || \$3 !~ /^[0-9]+\$/ ||
+        \$2 < 0 || \$3 <= \$2 || \$3 > chromosome_size[\$1]) {
         print "motif anchor row " FNR " has invalid coordinates" > "/dev/stderr"
         exit 2
     }
-    center = int(($2 + $3) / 2)
+    center = int((\$2 + \$3) / 2)
     requested_start = center - int(window / 2)
-    maximum_start = chromosome_size[$1] - window
+    maximum_start = chromosome_size[\$1] - window
     if (maximum_start < 0) {
         start = 0
-        end = chromosome_size[$1]
+        end = chromosome_size[\$1]
     } else {
         start = requested_start
         if (start < 0) {
@@ -192,7 +192,7 @@ FNR == NR {
         end = start + window
     }
     count += 1
-    printf "%s\t%d\t%d\tpeak_%06d\n", $1, start, end, count
+    printf "%s\t%d\t%d\tpeak_%06d\n", \$1, start, end, count
 }
 AWK
 
@@ -314,19 +314,19 @@ BEGIN {
 }
 FNR == NR {
     foreground_count += 1
-    foreground_name[foreground_count] = $1
-    foreground_length[foreground_count] = $2
-    foreground_gc[foreground_count] = $3
+    foreground_name[foreground_count] = \$1
+    foreground_length[foreground_count] = \$2
+    foreground_gc[foreground_count] = \$3
     next
 }
 {
     candidate_count += 1
-    candidate_chromosome[candidate_count] = $1
-    candidate_start[candidate_count] = $2
-    candidate_end[candidate_count] = $3
-    candidate_name[candidate_count] = $4
-    candidate_length[candidate_count] = $5
-    candidate_gc[candidate_count] = $6
+    candidate_chromosome[candidate_count] = \$1
+    candidate_start[candidate_count] = \$2
+    candidate_end[candidate_count] = \$3
+    candidate_name[candidate_count] = \$4
+    candidate_length[candidate_count] = \$5
+    candidate_gc[candidate_count] = \$6
 }
 END {
     for (foreground_index = 1;
