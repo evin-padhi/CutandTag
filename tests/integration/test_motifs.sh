@@ -219,8 +219,15 @@ gc_match = re.search(
     prepare,
     re.DOTALL,
 )
-if not window_match or not gc_match:
-    raise SystemExit("FAIL: could not extract motif window/GC matching programs")
+bed3_match = re.search(
+    r'cat > "normalize_bed3\.awk" <<\'AWK\'\n(.*?)\nAWK',
+    prepare,
+    re.DOTALL,
+)
+if not window_match or not gc_match or not bed3_match:
+    raise SystemExit(
+        "FAIL: could not extract motif window/GC/BED3 normalization programs"
+    )
 
 def render_nextflow_gstring(text):
     return (
@@ -238,6 +245,30 @@ def render_nextflow_gstring(text):
     render_nextflow_gstring(gc_match.group(1)) + "\n",
     encoding="utf-8",
 )
+(tmp / "normalize_bed3.awk").write_text(
+    render_nextflow_gstring(bed3_match.group(1)) + "\n",
+    encoding="utf-8",
+)
+
+(tmp / "mixed_width_exclusions.bed").write_text(
+    "chr1\t10115\t10430\tsample_peak_57\t80\t.\t2.9552\t11.4229\t8.0468\n"
+    "# blacklist regions use BED3\n"
+    "chr1\t20000\t20200\n",
+    encoding="utf-8",
+)
+bed3_result = subprocess.run(
+    [
+        "awk", "-f", str(tmp / "normalize_bed3.awk"),
+        str(tmp / "mixed_width_exclusions.bed"),
+    ],
+    capture_output=True,
+    text=True,
+    check=True,
+)
+assert bed3_result.stdout.splitlines() == [
+    "chr1\t10115\t10430",
+    "chr1\t20000\t20200",
+]
 
 (tmp / "reference.genome").write_text("chrMini\t500\nchrShort\t80\n", encoding="utf-8")
 (tmp / "summits.bed").write_text(

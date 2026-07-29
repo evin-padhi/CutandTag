@@ -92,7 +92,11 @@ process PREPARE_MOTIF_SEQUENCES {
         )
     }
     def blacklistAppend = suppliedBlacklists
-        ? 'cat "blacklist/regions.bed" >> "background_exclusions.unsorted.bed"'
+        ? '''
+        awk -f "normalize_bed3.awk" \
+            "blacklist/regions.bed" \
+            >> "background_exclusions.unsorted.bed"
+        '''
         : 'true'
     def anchorPreparation
     if (anchorMode == 'summit') {
@@ -196,6 +200,22 @@ FNR == NR {
 }
 AWK
 
+    cat > "normalize_bed3.awk" <<'AWK'
+BEGIN {
+    OFS = "\t"
+}
+/^[[:space:]]*(\$|#)/ {
+    next
+}
+{
+    if (NF < 3) {
+        print "BED row " FNR " has fewer than three fields" > "/dev/stderr"
+        exit 2
+    }
+    print \$1, \$2, \$3
+}
+AWK
+
     awk \
         -v mode="${anchorMode}" \
         -v window="${window}" \
@@ -223,7 +243,9 @@ AWK
             > "foreground.fa" \
             2>> "prepare_motif_sequences.log"
 
-        cp "final.peaks.bed" "background_exclusions.unsorted.bed"
+        awk -f "normalize_bed3.awk" \
+            "final.peaks.bed" \
+            > "background_exclusions.unsorted.bed"
         ${blacklistAppend}
         bedtools sort \
             -i "background_exclusions.unsorted.bed" \
