@@ -7,7 +7,8 @@ process DEMULTIPLEX_I2 {
 
     publishDir "${params.outdir}/demultiplex/${meta.library_id}",
         mode: 'copy',
-        overwrite: true
+        overwrite: true,
+        saveAs: { filename -> filename.tokenize('/').last() }
 
     input:
     tuple val(meta), path(r1, stageAs: 'input_R1.fastq.gz'), path(r2, stageAs: 'input_R2.fastq.gz'), path(i2, stageAs: 'input_I2.fastq.gz'), val(samples)

@@ -204,14 +204,16 @@ workflow QC {
      * is empty. A supplied TSS BED takes precedence over GTF as documented.
      * Therefore absent annotations close cleanly and never deadlock coverage.
      */
-    reusable_gtf = gtf.collect(flat: false).map { rows ->
-        singletonOptional(rows, 'GTF')
-    }
-    reusable_tss_bed = tss_bed.collect(flat: false).map { rows ->
-        singletonOptional(rows, 'TSS BED')
-    }
+    reusable_gtf = gtf.collect(flat: false)
+        .ifEmpty { ignored -> [] }
+        .map { rows -> [files: singletonOptional(rows, 'GTF')] }
+    reusable_tss_bed = tss_bed.collect(flat: false)
+        .ifEmpty { ignored -> [] }
+        .map { rows -> [files: singletonOptional(rows, 'TSS BED')] }
     annotation_choice = reusable_gtf.combine(reusable_tss_bed).map {
-        gtf_rows, tss_rows ->
+        gtf_holder, tss_holder ->
+        def gtf_rows = gtf_holder.files
+        def tss_rows = tss_holder.files
         def annotation_mode = tss_rows ? 'bed' : (gtf_rows ? 'gtf' : 'none')
         def annotation_files = tss_rows ?: gtf_rows
         tuple(annotation_mode, annotation_files)
@@ -244,7 +246,7 @@ workflow QC {
 
     fastqc_files = fastqc_reports.flatMap { meta, html, zip ->
         def files = []
-        for (value in [html, zip]) {
+        [html, zip].each { value ->
             if (value instanceof java.util.Collection) {
                 files.addAll(value)
             } else if (value != null) {
@@ -252,25 +254,45 @@ workflow QC {
             }
         }
         files
-    }.collect()
+    }.reduce([files: []]) { holder, path ->
+        [files: holder.files + [path]]
+    }.map { holder -> holder.files }
     demux_custom_files = DEMUX_QC_CUSTOM.out.custom
         .map { meta, custom -> custom }
-        .collect()
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     library_custom_files = LIBRARY_QC_CUSTOM.out.custom
         .map { meta, custom, insertDistribution -> custom }
-        .collect()
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     insert_size_files = LIBRARY_QC_CUSTOM.out.custom
         .map { meta, custom, insertDistribution -> insertDistribution }
-        .collect()
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     peak_qc_files = PEAK_QC.out.qc
         .map { meta, json, tsv, histogram, perPeak -> tsv }
-        .collect()
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     motif_metric_files = MOTIF_QC_CUSTOM.out.custom
         .map { meta, custom -> custom }
-        .collect()
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     tss_status_files = TSS_ENRICHMENT.out.profiles
         .map { meta, bed, matrix, matrixTable, profile, status -> status }
-        .collect()
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
 
     MULTIQC(
         fastqc_files,

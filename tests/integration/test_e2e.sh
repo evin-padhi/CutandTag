@@ -148,8 +148,9 @@ checks = {
             "run_summary.txt",
             "WRITE_PIPELINE_PARAMETERS",
             "WRITE_COMPLETION_SUMMARY",
-            "workflow.onComplete",
-        )),
+        ))
+        and "workflow.onComplete" in base_config
+        and "workflow.onError" in base_config,
     "test profile is included from the base configuration":
         re.search(
             r"test\s*\{[^}]*includeConfig\s+['\"]conf/test\.config['\"]",

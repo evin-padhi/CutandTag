@@ -1,10 +1,5 @@
 nextflow.enable.dsl = 2
 
-import groovy.json.JsonOutput
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
-
 include { DEMULTIPLEX } from './subworkflows/local/demultiplex'
 include { ALIGN_QC } from './subworkflows/local/align_qc'
 include { PEAKS } from './subworkflows/local/peaks'
@@ -23,14 +18,14 @@ def parameterText(rawValue, label, required = true) {
 
 def resolveLocalPath(rawValue, label, launchBase) {
     def text = parameterText(rawValue, label)
-    if (text ==~ /.*[*?[\]{}].*/) {
+    if (['*', '?', '[', ']', '{', '}'].any { marker -> text.contains(marker) }) {
         throw new IllegalArgumentException(
             "${label} must be one explicit local path, not a glob: ${text}"
         )
     }
-    Path path = Paths.get(text)
+    java.nio.file.Path path = java.nio.file.Paths.get(text)
     if (!path.isAbsolute()) {
-        path = Paths.get(launchBase.toString()).resolve(path)
+        path = java.nio.file.Paths.get(launchBase.toString()).resolve(path)
     }
     path.normalize().toAbsolutePath()
 }
@@ -42,7 +37,10 @@ def validateRegularFile(rawValue, label, launchBase, required = false) {
         return null
     }
     def path = resolveLocalPath(text, label, launchBase)
-    if (!Files.isRegularFile(path) || !Files.isReadable(path)) {
+    if (
+        !java.nio.file.Files.isRegularFile(path) ||
+        !java.nio.file.Files.isReadable(path)
+    ) {
         throw new IllegalArgumentException(
             "${label} is not a readable regular file: ${path}"
         )
@@ -59,13 +57,19 @@ def validateBowtie2IndexPrefix(rawValue, launchBase) {
     def prefix = resolveLocalPath(text, '--bowtie2_index', launchBase).toString()
     def suffixes = ['1', '2', '3', '4', 'rev.1', 'rev.2']
     def small = suffixes.collect { suffix ->
-        Paths.get("${prefix}.${suffix}.bt2")
+        java.nio.file.Paths.get("${prefix}.${suffix}.bt2")
     }
     def large = suffixes.collect { suffix ->
-        Paths.get("${prefix}.${suffix}.bt2l")
+        java.nio.file.Paths.get("${prefix}.${suffix}.bt2l")
     }
-    def completeSmall = small.every { Files.isRegularFile(it) && Files.isReadable(it) }
-    def completeLarge = large.every { Files.isRegularFile(it) && Files.isReadable(it) }
+    def completeSmall = small.every {
+        java.nio.file.Files.isRegularFile(it) &&
+        java.nio.file.Files.isReadable(it)
+    }
+    def completeLarge = large.every {
+        java.nio.file.Files.isRegularFile(it) &&
+        java.nio.file.Files.isReadable(it)
+    }
     if (completeSmall == completeLarge) {
         throw new IllegalArgumentException(
             "--bowtie2_index must identify exactly one complete six-file " +
@@ -82,13 +86,13 @@ def validateFasta(rawValue, launchBase) {
         return null
     }
     def firstNonBlank = null
-    Files.newBufferedReader(Paths.get(fasta)).withCloseable { reader ->
-        String line
-        while (firstNonBlank == null && (line = reader.readLine()) != null) {
-            if (!line.trim().isEmpty()) {
-                firstNonBlank = line
-            }
-        }
+    java.nio.file.Files.newBufferedReader(
+        java.nio.file.Paths.get(fasta)
+    ).withCloseable { reader ->
+        firstNonBlank = reader.lines()
+            .filter { line -> !line.trim().isEmpty() }
+            .findFirst()
+            .orElse(null)
     }
     if (firstNonBlank == null || !firstNonBlank.startsWith('>')) {
         throw new IllegalArgumentException(
@@ -111,9 +115,10 @@ def validateMemeDatabase(rawValue, launchBase) {
     }
     def firstNonBlank = null
     def hasMotif = false
-    Files.newBufferedReader(Paths.get(motifDb)).withCloseable { reader ->
-        String line
-        while ((line = reader.readLine()) != null) {
+    java.nio.file.Files.newBufferedReader(
+        java.nio.file.Paths.get(motifDb)
+    ).withCloseable { reader ->
+        reader.eachLine { line ->
             if (firstNonBlank == null && !line.trim().isEmpty()) {
                 firstNonBlank = line
             }
@@ -222,7 +227,10 @@ def validateFixedSetting(rawValue, expectedValue, label) {
 
 def validateOutputDirectory(rawValue, launchBase) {
     def path = resolveLocalPath(rawValue, '--outdir', launchBase)
-    if (Files.exists(path) && !Files.isDirectory(path)) {
+    if (
+        java.nio.file.Files.exists(path) &&
+        !java.nio.file.Files.isDirectory(path)
+    ) {
         throw new IllegalArgumentException(
             "--outdir exists but is not a directory: ${path}"
         )
@@ -334,16 +342,15 @@ def optionalPathChannel(pathText) {
 
 
 def versionPath(versionRecord) {
-    def current = versionRecord
-    while (current instanceof java.util.Collection) {
-        if (current.isEmpty()) {
-            throw new IllegalArgumentException(
-                "version output contains an empty tuple"
-            )
-        }
-        current = current.last()
+    if (!(versionRecord instanceof java.util.Collection)) {
+        return versionRecord
     }
-    current
+    if (versionRecord.isEmpty()) {
+        throw new IllegalArgumentException(
+            "version output contains an empty tuple"
+        )
+    }
+    versionPath(versionRecord.last())
 }
 
 
@@ -368,7 +375,8 @@ process WRITE_PIPELINE_PARAMETERS {
     script:
     """
     set -euo pipefail
-    printf '%s' "${encoded_parameters}" | base64 --decode \
+    printf '%s' "${encoded_parameters}" | python -c \
+        'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.buffer.read()))' \
         > "validated_parameters.json"
     printf 'WRITE_PIPELINE_PARAMETERS:\\n  python: ' \
         > "pipeline_parameters_versions.yml"
@@ -404,15 +412,15 @@ files = sorted(Path(".").glob("versions*/*"))
 if not files:
     raise SystemExit("no version records were supplied")
 with open("software_versions.yml", "w", encoding="utf-8") as output:
-    output.write("pipeline_software_versions:\n")
+    output.write("pipeline_software_versions:\\n")
     for index, path in enumerate(files, start=1):
-        output.write(f"  record_{index:04d}:\n")
-        output.write(f"    source: {path.name}\n")
-        output.write("    content: |\n")
+        output.write(f"  record_{index:04d}:\\n")
+        output.write(f"    source: {path.name}\\n")
+        output.write("    content: |\\n")
         for line in path.read_text(encoding="utf-8").splitlines():
-            output.write(f"      {line}\n")
-    output.write("  collector:\n")
-    output.write("    implementation: repository\n")
+            output.write(f"      {line}\\n")
+    output.write("  collector:\\n")
+    output.write("    implementation: repository\\n")
 PY
     '''
 }
@@ -453,24 +461,24 @@ with open(
     encoding="utf-8",
     newline="",
 ) as handle:
-    targets = list(csv.DictReader(handle, delimiter="\t"))
+    targets = list(csv.DictReader(handle, delimiter="\\t"))
 if not Path("report/multiqc_report.html").stat().st_size:
     raise SystemExit("MultiQC report is empty")
 if not Path("pipeline/software_versions.yml").stat().st_size:
     raise SystemExit("software version manifest is empty")
 with open("run_summary.txt", "w", encoding="utf-8") as output:
-    output.write("status\tsucceeded\n")
-    output.write(f"target_count\t{len(targets)}\n")
-    output.write(f"motif_enabled\t{str(bool(parameters['motif_db'])).lower()}\n")
-    output.write("report\treports/multiqc/multiqc_report.html\n")
-    output.write("target_summary\treports/summary/combined_target_qc.tsv\n")
-    output.write("versions\tpipeline_info/software_versions.yml\n")
+    output.write("status\\tsucceeded\\n")
+    output.write(f"target_count\\t{len(targets)}\\n")
+    output.write(f"motif_enabled\\t{str(bool(parameters['motif_db'])).lower()}\\n")
+    output.write("report\\treports/multiqc/multiqc_report.html\\n")
+    output.write("target_summary\\treports/summary/combined_target_qc.tsv\\n")
+    output.write("versions\\tpipeline_info/software_versions.yml\\n")
 PY
     '''
 }
 
 
-workflow {
+workflow NANOCUT {
     main:
     validated = validatePipelineParameters(params, launchDir)
     params.outdir = validated.outdir
@@ -549,7 +557,9 @@ workflow {
 
     parameter_map = new LinkedHashMap(validated)
     parameter_map.profile = workflow.profile
-    parameter_json = JsonOutput.prettyPrint(JsonOutput.toJson(parameter_map)) + '\n'
+    parameter_json = groovy.json.JsonOutput.prettyPrint(
+        groovy.json.JsonOutput.toJson(parameter_map)
+    ) + '\n'
     encoded_parameters = parameter_json.bytes.encodeBase64().toString()
     WRITE_PIPELINE_PARAMETERS(Channel.value(encoded_parameters))
 
@@ -597,18 +607,6 @@ workflow {
 }
 
 
-workflow.onComplete {
-    if (workflow.success) {
-        log.info(
-            "Bulk nano-CUT&Tag pipeline completed successfully. " +
-            "Results: ${params.outdir}"
-        )
-    }
-}
-
-
-workflow.onError {
-    log.error(
-        "Bulk nano-CUT&Tag pipeline failed: ${workflow.errorMessage ?: 'unknown error'}"
-    )
+workflow {
+    NANOCUT()
 }

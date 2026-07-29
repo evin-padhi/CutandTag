@@ -1,5 +1,3 @@
-import groovy.json.JsonSlurper
-
 include { VALIDATE_MANIFEST } from '../../modules/local/validate_manifest'
 include { DEMULTIPLEX_I2 } from '../../modules/local/demultiplex_i2'
 include { FASTQC } from '../../modules/local/fastqc'
@@ -14,7 +12,7 @@ workflow DEMULTIPLEX {
     VALIDATE_MANIFEST(manifest)
 
     manifest_rows = VALIDATE_MANIFEST.out.normalized.flatMap { normalized_json ->
-        def records = new JsonSlurper().parse(normalized_json.toFile())
+        def records = new groovy.json.JsonSlurper().parse(normalized_json.toFile())
         records.collect { raw_record ->
             def record = raw_record.collectEntries { key, value ->
                 [(key.toString()): value]

@@ -192,7 +192,7 @@ FNR == NR {
         end = start + window
     }
     count += 1
-    printf "%s\t%d\t%d\tpeak_%06d\n", \$1, start, end, count
+    printf "%s\\t%d\\t%d\\tpeak_%06d\\n", \$1, start, end, count
 }
 AWK
 
