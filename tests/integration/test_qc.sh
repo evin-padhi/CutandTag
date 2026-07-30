@@ -239,7 +239,7 @@ checks = {
         and '"AME status"' in qc_dashboard,
     "dashboard receives explicit motif-analysis intent and generator version":
         '--motif-analysis-status "${motifAnalysisStatus}"' in qc_dashboard
-        and "qc_dashboard.py: 1.0.0" in qc_dashboard,
+        and "qc_dashboard.py: 1.1.0" in qc_dashboard,
     "dashboard atomically builds outside the live Nextflow task directory":
         '--outdir "dashboard_bundle"' in qc_dashboard
         and '"dashboard_bundle/qc_dashboard.html"' in qc_dashboard

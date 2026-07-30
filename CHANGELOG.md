@@ -13,6 +13,10 @@ All notable changes to this project are documented in this file.
 - Added schema-versioned, generator-versioned dashboard JSON with explicit
   target/control counts, per-family availability, structured warnings, and
   insert-size and peak-width distributions.
+- Added six sequencing and five peak small-multiple panels, shared 250-bp
+  distribution bins, a fragments-per-peak coverage ECDF, direct sample labels,
+  and a complete-AME motif enrichment heatmap that includes all cognate motifs
+  plus the 15 strongest non-cognate motifs.
 
 ### Changed
 
@@ -25,6 +29,9 @@ All notable changes to this project are documented in this file.
 - Dashboard TSV booleans now use lowercase machine values, optional-analysis
   states distinguish skipped/empty/missing/failed results, and the five-file
   direct-CLI output is published as a rollback-safe bundle.
+- The dashboard generator is now version `1.1.0`. HTML tables and chart labels
+  use three significant digits while TSV and JSON data products retain full
+  precision; long supporting tables are collapsed by default.
 
 ## 0.1.0 — 2026-07-23
 

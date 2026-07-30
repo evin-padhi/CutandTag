@@ -2215,6 +2215,10 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         series_metadata,
         x_axis_label="Insert size (bp)",
     )
+    insert += (
+        '<p class="panel-note">Insert-size and peak-width distributions use '
+        'shared 250 bp bins across all samples.</p>'
+    )
     insert_rows = [
         {
             "sample_id": sample_id,

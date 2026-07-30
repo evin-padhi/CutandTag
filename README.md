@@ -304,9 +304,46 @@ Empty target peak sets are valid outputs with zero/NA QC and recorded motif
 skip status. IgG libraries receive read/alignment/library QC but are not
 peak-called against themselves and do not receive target FRiP by default.
 
+### Dashboard visual summaries
+
+The HTML opens with six sequencing panels: assigned read pairs, barcode
+balance within each physical library, mapped reads, usable fragments after
+filtering, PCR duplication, and end-to-end usable yield. The five peak panels show
+peak count, FRiP, total bases covered, the peak-width median and range, and peak
+count versus usable fragments. Values are printed above bars, and axes include
+their units.
+
+Insert-size and peak-width distributions use normalized, shared 250-bp bins
+whose percentages are comparable across samples. The underlying
+`insert_size_distribution` and `width_distribution` arrays in
+`qc_summary.json` remain unbinned. The fragments-per-peak coverage ECDF is
+built from
+`qc/peaks/<sample_id>/<sample_id>.peak_qc.fragments_per_peak.tsv`; its public
+JSON representation is a compact `fragment_count`/`peak_count` histogram.
+Peaks with no overlapping fragments are retained as zero-fragment peaks and
+reported explicitly rather than dropped or converted to missing values.
+
+Across bar, distribution, fragments-per-peak, TSS, and scatter panels, the
+target palette uses stable colors for IgG, CTCF, GATA1, and RUNX1, with
+deterministic fallback colors for other targets. Line plots use direct endpoint labels
+and distinct markers/dashes so the samples remain identifiable without color
+alone.
+
+The motif enrichment heatmap consumes complete AME output. It displays all
+cognate motifs detected by whole-token matching (for example, `GATA1::TAL1`
+and `TAL1::GATA1`) plus the 15 non-cognate motifs with the strongest adjusted
+p-values across the cohort. `GATA10` therefore does not match an expected
+`GATA1`. The separate `top_motifs.tsv` export remains capped at ten motifs per
+target.
+
+HTML tables and chart labels use three significant digits for compact
+presentation. Machine-readable TSV and JSON outputs retain full precision, so
+downstream calculations should consume those files rather than values copied
+from the HTML. Long supporting tables are collapsed by default.
+
 ## Dashboard data-product schemas
 
-The dashboard machine-readable contract is schema version `1` and generator version `1.0.0`.
+The dashboard machine-readable contract is schema version `1` and generator version `1.1.0`.
 This is the first released form of the contract. Consumers
 should check both values before interpreting fields. The HTML is a descriptive
 view of these products, not a machine interface.
@@ -353,9 +390,10 @@ the `demultiplex`, `library`, `insert_size`, `peak`, `peak_width`, `tss`,
 `motif`, and `ame` families. Each sample carries the same families with a
 status and reason; statuses are `computed`, `skipped`, `empty`, `missing`,
 `failed`, or `not_applicable`. Insert-size and peak-width distributions are
-arrays under the corresponding sample's `library` and `peak` objects.
-Producer-specific columns are not added automatically to this versioned
-public object.
+full-resolution, unbinned arrays under the corresponding sample's `library`
+and `peak` objects. The target-only `fragments_per_peak_distribution` is a
+compact histogram under `peak`. Producer-specific columns are not added
+automatically to this versioned public object.
 
 TSV missing numeric values are empty fields, booleans are lowercase `true` or
 `false`, and finite numbers use locale-independent text. JSON missing values

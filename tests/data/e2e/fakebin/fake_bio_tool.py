@@ -321,8 +321,28 @@ def fake_bedtools(args: list[str]) -> None:
 
 def fake_ame(args: list[str]) -> None:
     sys.stdout.write(
+        "# motif_qc_complete_database=true\n"
         "rank\tmotif_ID\tmotif_Alt_ID\tp-value\tadj_p-value\tpos\tneg\tenrichment\n"
         "1\tMA0139.1\tCTCF\t0.001\t0.01\t1\t1\t5.0\n"
+        "2\tMA1929.1\tCTCF::ZNF143\t0.002\t0.02\t1\t1\t4.9\n"
+        "3\tMA0140.2\tGATA1::TAL1\t0.003\t0.03\t1\t1\t4.8\n"
+        "4\tMA1356.1\tTAL1::GATA1\t0.004\t0.04\t1\t1\t4.7\n"
+        "5\tMA0002.2\tRUNX1\t0.005\t0.05\t1\t1\t4.6\n"
+        "6\tMA9999.1\tGATA10\t0.006\t0.06\t1\t1\t4.5\n"
+        "7\tMA0007.1\tAR\t0.007\t0.07\t1\t1\t4.4\n"
+        "8\tMA0008.1\tETS1\t0.008\t0.08\t1\t1\t4.3\n"
+        "9\tMA0009.1\tFLI1\t0.009\t0.09\t1\t1\t4.2\n"
+        "10\tMA0010.1\tKLF1\t0.010\t0.10\t1\t1\t4.1\n"
+        "11\tMA0011.1\tNFE2\t0.011\t0.11\t1\t1\t4.0\n"
+        "12\tMA0012.1\tSPI1\t0.012\t0.12\t1\t1\t3.9\n"
+        "13\tMA0013.1\tETV6\t0.013\t0.13\t1\t1\t3.8\n"
+        "14\tMA0014.1\tRUNX2\t0.014\t0.14\t1\t1\t3.7\n"
+        "15\tMA0015.1\tRUNX3\t0.015\t0.15\t1\t1\t3.6\n"
+        "16\tMA0016.1\tGATA2\t0.016\t0.16\t1\t1\t3.5\n"
+        "17\tMA0017.1\tTAL1::TCF3\t0.017\t0.17\t1\t1\t3.4\n"
+        "18\tMA0018.1\tZNF143\t0.018\t0.18\t1\t1\t3.3\n"
+        "19\tMA0019.1\tCEBPA\t0.019\t0.19\t1\t1\t3.2\n"
+        "20\tMA0020.1\tJUN\t0.020\t0.20\t1\t1\t3.1\n"
     )
 
 

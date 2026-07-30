@@ -1463,6 +1463,7 @@ class DashboardOutputTests(unittest.TestCase):
         )
         dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
         self.assertIn("Insert-size distribution", dashboard)
+        self.assertIn("250 bp bins", dashboard)
         self.assertIn(">[0, 250)<", dashboard)
         self.assertIn(">23.0<", dashboard)
         self.assertIn("Peak-width distribution", dashboard)
