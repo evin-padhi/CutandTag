@@ -2,8 +2,9 @@
 
 from dataclasses import dataclass
 import hashlib
+import html
 import math
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 TARGET_COLORS: Mapping[str, str] = {
@@ -204,3 +205,482 @@ def pack_endpoint_labels(
     if underflow > 0:
         positions = [position + underflow for position in positions]
     return {label: position for (label, _), position in zip(ordered, positions)}
+
+
+@dataclass(frozen=True)
+class BarMetric:
+    """Declarative configuration for one dashboard bar-chart metric."""
+
+    key: str
+    title: str
+    axis_label: str
+    value_multiplier: float = 1.0
+    log10_axis: bool = False
+    formatter: Callable[[object], str] = format_significant
+
+
+def _numeric(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _exact_number(value: float) -> str:
+    return format(value, ".15g")
+
+
+def _axis_name(title: str, axis_label: str) -> str:
+    return f"{title} ({axis_label})"
+
+
+def _visible_number(value: float, axis_label: str) -> str:
+    suffix = "%" if axis_label.strip() in {"%", "Percent"} else ""
+    return f"{format_significant(value, compact=False)}{suffix}"
+
+
+def _nice_linear_max(maximum: float) -> float:
+    if maximum <= 0:
+        return 1.0
+    exponent = math.floor(math.log10(maximum))
+    fraction = maximum / (10 ** exponent)
+    nice_fraction = next(
+        candidate for candidate in (1.0, 2.0, 5.0, 10.0)
+        if candidate >= fraction
+    )
+    return nice_fraction * (10 ** exponent)
+
+
+def _linear_ticks(maximum: float) -> list[float]:
+    domain_max = _nice_linear_max(maximum)
+    return [domain_max * index / 4.0 for index in range(5)]
+
+
+def _svg_axis_y(
+    ticks: Sequence[tuple[float, str]], *, left: float, right: float,
+    plot_top: float, plot_bottom: float, domain_min: float, domain_max: float,
+) -> str:
+    span = domain_max - domain_min or 1.0
+    fragments = []
+    for value, label in ticks:
+        y = plot_bottom - (value - domain_min) / span * (plot_bottom - plot_top)
+        fragments.append(
+            f'<line class="axis-grid" x1="{left:.1f}" y1="{y:.1f}" '
+            f'x2="{right:.1f}" y2="{y:.1f}"/>'
+            f'<text class="axis-tick-label axis-tick-y" x="{left - 8:.1f}" '
+            f'y="{y + 4:.1f}" text-anchor="end">{html.escape(label)}</text>'
+        )
+    return "".join(fragments)
+
+
+def _svg_axis_x_ticks(
+    ticks: Sequence[tuple[float, str]], *, left: float, right: float,
+    plot_bottom: float, domain_min: float, domain_max: float,
+) -> str:
+    span = domain_max - domain_min or 1.0
+    fragments = []
+    for value, label in ticks:
+        x = left + (value - domain_min) / span * (right - left)
+        fragments.append(
+            f'<line class="axis-grid" x1="{x:.1f}" y1="32" '
+            f'x2="{x:.1f}" y2="{plot_bottom:.1f}"/>'
+            f'<text class="axis-tick-label axis-tick-x" x="{x:.1f}" '
+            f'y="{plot_bottom + 18:.1f}" text-anchor="middle">{html.escape(label)}</text>'
+        )
+    return "".join(fragments)
+
+
+def _empty_panel(title: str, axis_label: str) -> str:
+    accessible_name = html.escape(_axis_name(title, axis_label), quote=True)
+    return (
+        f'<article class="qc-panel empty-panel" role="status" '
+        f'aria-label="{accessible_name}"><h3>{html.escape(title)}</h3>'
+        '<p class="empty">No numeric data available; values are NA.</p></article>'
+    )
+
+
+def _sample_label(
+    sample_id: str, *, x: float, y: float, rotate: bool,
+) -> str:
+    escaped = html.escape(sample_id)
+    if rotate:
+        return (
+            f'<text class="sample-label rotated" x="{x:.1f}" y="{y:.1f}" '
+            f'transform="rotate(45 {x:.1f} {y:.1f})" '
+            f'text-anchor="start">{escaped}</text>'
+        )
+    return (
+        f'<text class="sample-label" x="{x:.1f}" y="{y:.1f}" '
+        f'text-anchor="middle">{escaped}</text>'
+    )
+
+
+def render_bar_panel(
+    title: str,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    value_key: str,
+    axis_label: str,
+    value_multiplier: float = 1.0,
+    log10_axis: bool = False,
+) -> str:
+    """Render one accessible, horizontally scalable QC bar panel."""
+    if not rows:
+        return _empty_panel(title, axis_label)
+    prepared: list[tuple[Mapping[str, object], str, float | None]] = []
+    for row in rows:
+        number = _numeric(row.get(value_key))
+        value = number * value_multiplier if number is not None else None
+        if value is not None and (value < 0 or (log10_axis and value <= 0)):
+            value = None
+        prepared.append((row, str(row.get("sample_id", "")), value))
+    numeric = [value for _, _, value in prepared if value is not None]
+    if not numeric and not prepared:
+        return _empty_panel(title, axis_label)
+
+    transformed = [math.log10(value) for value in numeric] if log10_axis else numeric
+    if log10_axis:
+        domain_min = math.floor(min(transformed)) - 1.0 if transformed else 0.0
+        domain_max = math.ceil(max(transformed)) if transformed else 1.0
+        tick_values = [
+            domain_min + (domain_max - domain_min) * index / 4.0
+            for index in range(5)
+        ]
+        ticks = [(value, f"10^{format(value, '.3g')}") for value in tick_values]
+        displayed_axis_label = f"{axis_label} (log10)"
+    else:
+        domain_min = 0.0
+        tick_values = _linear_ticks(max(numeric, default=0.0))
+        domain_max = tick_values[-1]
+        ticks = [
+            (value, format_significant(value, compact=True))
+            for value in tick_values
+        ]
+        displayed_axis_label = axis_label
+
+    longest = max((len(sample_id) for _, sample_id, _ in prepared), default=0)
+    rotate_labels = longest > 14
+    slot_width = max(56.0, min(190.0, longest * 7.0 + 18.0))
+    left, right_margin = 62.0, 18.0
+    plot_top, plot_bottom = 32.0, 236.0
+    label_space = min(150.0, longest * 5.0 + 32.0) if rotate_labels else 42.0
+    height = plot_bottom + label_space
+    width = max(500.0, left + right_margin + slot_width * len(prepared))
+    plot_right = width - right_margin
+    bar_width = slot_width * 0.62
+    span = domain_max - domain_min or 1.0
+    marks = []
+    for index, (row, sample_id, value) in enumerate(prepared):
+        center_x = left + slot_width * index + slot_width / 2.0
+        label_y = plot_bottom + 18.0
+        marks.append(
+            _sample_label(
+                sample_id, x=center_x, y=label_y, rotate=rotate_labels
+            )
+        )
+        assay_target = str(row.get("assay_target", ""))
+        is_control = bool(row.get("is_control"))
+        style = series_style(sample_id, assay_target, is_control=is_control)
+        escaped_sample = html.escape(sample_id, quote=True)
+        escaped_target = html.escape(assay_target, quote=True)
+        if value is None:
+            marks.append(
+                f'<text class="bar-value na-value" data-sample-id="{escaped_sample}" '
+                f'x="{center_x:.1f}" y="{plot_bottom - 6:.1f}" '
+                'text-anchor="middle">NA</text>'
+            )
+            continue
+        plotted_value = math.log10(value) if log10_axis else value
+        bar_height = max(
+            0.0,
+            (plotted_value - domain_min) / span * (plot_bottom - plot_top),
+        )
+        y = plot_bottom - bar_height
+        exact = _exact_number(value)
+        marks.append(
+            f'<rect class="bar" data-sample-id="{escaped_sample}" '
+            f'data-assay-target="{escaped_target}" '
+            f'data-sample-kind="{"control" if is_control else "target"}" '
+            f'x="{center_x - bar_width / 2.0:.1f}" y="{y:.1f}" '
+            f'width="{bar_width:.1f}" height="{bar_height:.1f}" '
+            f'fill="{style.color}" stroke="{style.color}" '
+            f'stroke-width="{"3" if is_control else "1"}">'
+            f'<title>{html.escape(sample_id)}: {exact}</title></rect>'
+            f'<text class="bar-value" x="{center_x:.1f}" '
+            f'y="{max(plot_top + 12.0, y - 5.0):.1f}" text-anchor="middle">'
+            f'{html.escape(_visible_number(value, axis_label))}</text>'
+        )
+
+    accessible_name = _axis_name(title, axis_label)
+    svg = (
+        f'<svg class="panel-chart" width="{width:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        f'aria-label="{html.escape(accessible_name, quote=True)}">'
+        f'<title>{html.escape(accessible_name)}</title>'
+        f'<text class="axis-title axis-title-y" x="16" '
+        f'y="{(plot_top + plot_bottom) / 2:.1f}" '
+        f'transform="rotate(-90 16 {(plot_top + plot_bottom) / 2:.1f})" '
+        f'text-anchor="middle">{html.escape(displayed_axis_label)}</text>'
+        + _svg_axis_y(
+            ticks,
+            left=left,
+            right=plot_right,
+            plot_top=plot_top,
+            plot_bottom=plot_bottom,
+            domain_min=domain_min,
+            domain_max=domain_max,
+        )
+        + "".join(marks)
+        + "</svg>"
+    )
+    return (
+        f'<article class="qc-panel"><h3>{html.escape(title)}</h3>'
+        f'<div class="panel-scroll" role="region" '
+        f'aria-label="{html.escape(title, quote=True)} chart" tabindex="0">'
+        f"{svg}</div></article>"
+    )
+
+
+def render_range_panel(
+    title: str,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    minimum_key: str,
+    q25_key: str,
+    median_key: str,
+    q75_key: str,
+    maximum_key: str,
+    axis_label: str,
+) -> str:
+    """Render minimum/maximum, interquartile range, and median per sample."""
+    if not rows:
+        return _empty_panel(title, axis_label)
+    keys = (minimum_key, q25_key, median_key, q75_key, maximum_key)
+    prepared = []
+    for row in rows:
+        values = tuple(_numeric(row.get(key)) for key in keys)
+        valid = (
+            all(value is not None and value >= 0 for value in values)
+            and list(values) == sorted(values)
+        )
+        prepared.append((row, values if valid else None))
+    observed = [
+        value
+        for _, values in prepared
+        if values is not None
+        for value in values
+    ]
+    domain_max = _nice_linear_max(max(observed, default=0.0))
+    ticks = [
+        (value, format_significant(value, compact=True))
+        for value in _linear_ticks(domain_max)
+    ]
+    longest = max(len(str(row.get("sample_id", ""))) for row, _ in prepared)
+    rotate_labels = longest > 14
+    slot_width = max(58.0, min(190.0, longest * 7.0 + 18.0))
+    left, right_margin = 62.0, 18.0
+    plot_top, plot_bottom = 32.0, 236.0
+    label_space = min(150.0, longest * 5.0 + 32.0) if rotate_labels else 42.0
+    height = plot_bottom + label_space
+    width = max(500.0, left + right_margin + slot_width * len(prepared))
+    plot_right = width - right_margin
+    marks = []
+    for index, (row, values) in enumerate(prepared):
+        sample_id = str(row.get("sample_id", ""))
+        center_x = left + slot_width * index + slot_width / 2.0
+        marks.append(
+            _sample_label(
+                sample_id, x=center_x, y=plot_bottom + 18.0,
+                rotate=rotate_labels,
+            )
+        )
+        if values is None:
+            marks.append(
+                f'<text class="na-value" x="{center_x:.1f}" '
+                f'y="{plot_bottom - 6:.1f}" text-anchor="middle">NA</text>'
+            )
+            continue
+        minimum, q25, median, q75, maximum = values
+
+        def y(value: float) -> float:
+            return plot_bottom - value / domain_max * (plot_bottom - plot_top)
+
+        assay_target = str(row.get("assay_target", ""))
+        style = series_style(
+            sample_id, assay_target, is_control=bool(row.get("is_control"))
+        )
+        tooltip = (
+            f"{sample_id}: min {_exact_number(minimum)}; "
+            f"Q25 {_exact_number(q25)}; median {_exact_number(median)}; "
+            f"Q75 {_exact_number(q75)}; max {_exact_number(maximum)}"
+        )
+        marks.append(
+            f'<g data-assay-target="{html.escape(assay_target, quote=True)}">'
+            f'<title>{html.escape(tooltip)}</title>'
+            f'<line class="range-min-max" x1="{center_x:.1f}" y1="{y(minimum):.1f}" '
+            f'x2="{center_x:.1f}" y2="{y(maximum):.1f}" stroke="{style.color}" '
+            'stroke-width="2"/>'
+            f'<line class="range-iqr" x1="{center_x:.1f}" y1="{y(q25):.1f}" '
+            f'x2="{center_x:.1f}" y2="{y(q75):.1f}" stroke="{style.color}" '
+            'stroke-width="8"/>'
+            f'<circle class="range-median" cx="{center_x:.1f}" cy="{y(median):.1f}" '
+            f'r="5" fill="{style.color}" stroke="#fff" stroke-width="1.5"/></g>'
+        )
+    accessible_name = _axis_name(title, axis_label)
+    svg = (
+        f'<svg class="panel-chart" width="{width:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        f'aria-label="{html.escape(accessible_name, quote=True)}">'
+        f'<title>{html.escape(accessible_name)}</title>'
+        f'<text class="axis-title axis-title-y" x="16" '
+        f'y="{(plot_top + plot_bottom) / 2:.1f}" '
+        f'transform="rotate(-90 16 {(plot_top + plot_bottom) / 2:.1f})" '
+        f'text-anchor="middle">{html.escape(axis_label)}</text>'
+        + _svg_axis_y(
+            ticks, left=left, right=plot_right, plot_top=plot_top,
+            plot_bottom=plot_bottom, domain_min=0.0, domain_max=domain_max,
+        )
+        + "".join(marks)
+        + "</svg>"
+    )
+    return (
+        f'<article class="qc-panel"><h3>{html.escape(title)}</h3>'
+        f'<div class="panel-scroll" role="region" '
+        f'aria-label="{html.escape(title, quote=True)} chart" tabindex="0">'
+        f"{svg}</div></article>"
+    )
+
+
+def render_scatter_panel(
+    title: str,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    x_key: str,
+    y_key: str,
+    x_axis_label: str,
+    y_axis_label: str,
+    x_log10_axis: bool = False,
+) -> str:
+    """Render a labeled per-sample scatterplot with visible axes and leaders."""
+    points = []
+    for row in rows:
+        x_value = _numeric(row.get(x_key))
+        y_value = _numeric(row.get(y_key))
+        if (
+            x_value is None or y_value is None
+            or x_value < 0 or y_value < 0
+            or (x_log10_axis and x_value <= 0)
+        ):
+            continue
+        points.append((row, math.log10(x_value) if x_log10_axis else x_value, y_value, x_value))
+    displayed_x_axis = f"{x_axis_label} (log10)" if x_log10_axis else x_axis_label
+    if not points:
+        return _empty_panel(title, f"{displayed_x_axis}; {y_axis_label}")
+
+    width, height = 680.0, 330.0
+    left, right, plot_top, plot_bottom = 66.0, 535.0, 32.0, 270.0
+    x_values = [point[1] for point in points]
+    y_values = [point[2] for point in points]
+    if x_log10_axis:
+        x_min = math.floor(min(x_values))
+        x_max = math.ceil(max(x_values))
+        if x_min == x_max:
+            x_min -= 1.0
+        raw_x_ticks = [
+            x_min + (x_max - x_min) * index / 4.0 for index in range(5)
+        ]
+        x_ticks = [(value, f"10^{format(value, '.3g')}") for value in raw_x_ticks]
+    else:
+        x_min = 0.0
+        raw_x_ticks = _linear_ticks(max(x_values))
+        x_max = raw_x_ticks[-1]
+        x_ticks = [
+            (value, format_significant(value, compact=True))
+            for value in raw_x_ticks
+        ]
+    y_min = 0.0
+    raw_y_ticks = _linear_ticks(max(y_values))
+    y_max = raw_y_ticks[-1]
+    y_ticks = [
+        (value, format_significant(value, compact=True))
+        for value in raw_y_ticks
+    ]
+
+    def x_position(value: float) -> float:
+        return left + (value - x_min) / (x_max - x_min or 1.0) * (right - left)
+
+    def y_position(value: float) -> float:
+        return plot_bottom - value / (y_max or 1.0) * (plot_bottom - plot_top)
+
+    requested_labels = [
+        (str(row.get("sample_id", "")), y_position(y_value))
+        for row, _, y_value, _ in points
+    ]
+    minimum_gap = min(16.0, (plot_bottom - plot_top) / max(1, len(points) - 1))
+    label_positions = pack_endpoint_labels(
+        requested_labels,
+        lower=plot_top + 4.0,
+        upper=plot_bottom - 4.0,
+        minimum_gap=minimum_gap,
+    )
+    marks = []
+    for row, plotted_x, y_value, original_x in points:
+        sample_id = str(row.get("sample_id", ""))
+        assay_target = str(row.get("assay_target", ""))
+        style = series_style(
+            sample_id, assay_target, is_control=bool(row.get("is_control"))
+        )
+        point_x, point_y = x_position(plotted_x), y_position(y_value)
+        label_x, label_y = right + 24.0, label_positions[sample_id]
+        tooltip = (
+            f"{sample_id}: x {_exact_number(original_x)}; "
+            f"y {_exact_number(y_value)}"
+        )
+        marks.append(
+            f'<line class="scatter-leader" x1="{point_x:.1f}" y1="{point_y:.1f}" '
+            f'x2="{label_x - 4.0:.1f}" y2="{label_y:.1f}" '
+            f'stroke="{style.color}" stroke-width="1"/>'
+            f'<circle class="scatter-point" data-assay-target="'
+            f'{html.escape(assay_target, quote=True)}" cx="{point_x:.1f}" '
+            f'cy="{point_y:.1f}" r="5" fill="{style.color}">'
+            f'<title>{html.escape(tooltip)}</title></circle>'
+            f'<text class="scatter-label" x="{label_x:.1f}" y="{label_y + 4.0:.1f}" '
+            f'fill="{style.color}">{html.escape(sample_id)}</text>'
+        )
+    accessible_name = f"{title}: {displayed_x_axis} by {y_axis_label}"
+    svg = (
+        f'<svg class="panel-chart scatter-chart" viewBox="0 0 {width:.0f} {height:.0f}" '
+        f'role="img" aria-label="{html.escape(accessible_name, quote=True)}">'
+        f'<title>{html.escape(accessible_name)}</title>'
+        f'<text class="axis-title axis-title-x" x="{(left + right) / 2:.1f}" '
+        f'y="{height - 8:.1f}" text-anchor="middle">'
+        f'{html.escape(displayed_x_axis)}</text>'
+        f'<text class="axis-title axis-title-y" x="16" '
+        f'y="{(plot_top + plot_bottom) / 2:.1f}" '
+        f'transform="rotate(-90 16 {(plot_top + plot_bottom) / 2:.1f})" '
+        f'text-anchor="middle">{html.escape(y_axis_label)}</text>'
+        + _svg_axis_x_ticks(
+            x_ticks, left=left, right=right, plot_bottom=plot_bottom,
+            domain_min=x_min, domain_max=x_max,
+        )
+        + _svg_axis_y(
+            y_ticks, left=left, right=right, plot_top=plot_top,
+            plot_bottom=plot_bottom, domain_min=y_min, domain_max=y_max,
+        )
+        + "".join(marks)
+        + "</svg>"
+    )
+    return f'<article class="qc-panel"><h3>{html.escape(title)}</h3>{svg}</article>'
+
+
+def render_panel_grid(panels: Sequence[str], *, aria_label: str) -> str:
+    """Group dashboard panels into a responsive, accessibly named grid."""
+    return (
+        f'<div class="panel-grid" role="group" '
+        f'aria-label="{html.escape(aria_label, quote=True)}">'
+        + "".join(panels)
+        + "</div>"
+    )

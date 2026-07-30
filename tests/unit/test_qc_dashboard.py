@@ -1228,6 +1228,121 @@ class DashboardOutputTests(unittest.TestCase):
         ]
         return data
 
+    def test_dashboard_derived_rows_use_approved_units_and_denominators(self):
+        """A wrong denominator or silent zero would misstate library yield."""
+        rows = qc.derive_dashboard_rows([
+            {
+                "sample_id": "S1",
+                "sample_assigned_reads": 50,
+                "sample_assignment_fraction": 0.625,
+                "mapped_percent": 82.9,
+                "mapq_filtered_fragments": 38,
+                "duplicate_percent": 12,
+                "peak_count": 4_321,
+                "frip": 0.25,
+                "total_covered_bases": 1_234_567,
+            },
+            {
+                "sample_id": "ZERO",
+                "sample_assigned_reads": 0,
+                "mapq_filtered_fragments": 0,
+            },
+            {
+                "sample_id": "MISSING",
+                "sample_assigned_reads": None,
+                "mapq_filtered_fragments": 10,
+            },
+        ])
+
+        self.assertEqual(rows[0]["assigned_read_pairs_millions"], 0.00005)
+        self.assertEqual(rows[0]["barcode_balance_percent"], 62.5)
+        self.assertEqual(rows[0]["usable_fragments_millions"], 0.000038)
+        self.assertEqual(rows[0]["end_to_end_yield_percent"], 76.0)
+        self.assertEqual(rows[0]["peak_count_thousands"], 4.321)
+        self.assertEqual(rows[0]["frip_percent"], 25.0)
+        self.assertEqual(rows[0]["covered_megabases"], 1.234567)
+        self.assertIsNone(rows[1]["end_to_end_yield_percent"])
+        self.assertIsNone(rows[2]["end_to_end_yield_percent"])
+
+    def test_dashboard_renders_all_approved_small_multiple_panels(self):
+        """Dropping a panel would remove one of the approved cohort QC views."""
+        data = self.report_data()
+        target = data["samples_by_id"]["Z_TARGET"]
+        control = data["samples_by_id"]["A_IGG"]
+        target["library"].update({
+            "mapped_percent": 82.9,
+            "mapq_filtered_fragments": 38,
+            "duplicate_percent": 12,
+        })
+        control["library"].update({
+            "mapped_percent": 75,
+            "mapq_filtered_fragments": 20,
+            "duplicate_percent": 8,
+        })
+        target["peak"].update({
+            "peak_count": 4_321,
+            "total_covered_bases": 1_234_567,
+            "width_min": 100,
+            "width_q25": 125,
+            "width_median": 170,
+            "width_q75": 210,
+            "width_max": 300,
+            "frip": 0.25,
+        })
+
+        dashboard = qc.render_dashboard(data)
+
+        for title in (
+            "Assigned read pairs",
+            "Barcode balance within library",
+            "Mapped reads",
+            "Usable fragments after filtering",
+            "PCR duplication",
+            "End-to-end usable yield",
+            "Peak count",
+            "Fraction of reads in peaks",
+            "Total bases covered by peaks",
+            "Peak width median and range",
+            "Peak count vs usable fragments",
+            "TSS enrichment score",
+        ):
+            self.assertIn(f"<h3>{title}</h3>", dashboard)
+        self.assertIn('aria-label="Sequencing and alignment QC panels"', dashboard)
+        self.assertIn('aria-label="Peak QC panels"', dashboard)
+        self.assertIn('aria-label="TSS score panel"', dashboard)
+
+    def test_technical_panels_include_controls_and_peak_panels_exclude_them(self):
+        """IgG is technical QC data, but it has no biological peak call."""
+        data = self.report_data()
+        data["samples_by_id"]["A_IGG"]["library"].update({
+            "mapped_percent": 75,
+            "mapq_filtered_fragments": 20,
+            "duplicate_percent": 8,
+        })
+        data["samples_by_id"]["Z_TARGET"]["peak"].update({
+            "peak_count": 1,
+            "total_covered_bases": 100,
+            "width_min": 50,
+            "width_q25": 60,
+            "width_median": 70,
+            "width_q75": 80,
+            "width_max": 90,
+            "frip": 0.2,
+        })
+
+        dashboard = qc.render_dashboard(data)
+        sequencing = dashboard[
+            dashboard.index('aria-label="Sequencing and alignment QC panels"'):
+            dashboard.index('id="insert-size-distribution"')
+        ]
+        peaks = dashboard[
+            dashboard.index('aria-label="Peak QC panels"'):
+            dashboard.index('aria-label="Peaks and FRiP table"')
+        ]
+
+        self.assertIn('data-assay-target="IgG"', sequencing)
+        self.assertNotIn('data-assay-target="IgG"', peaks)
+
     def test_serializers_use_stable_columns_and_json_null(self):
         """A rearranged or zero-filled summary would break downstream analysis."""
         workspace = self.make_workspace()

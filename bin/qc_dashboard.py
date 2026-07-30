@@ -18,6 +18,13 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from motif_qc import read_ame
+from qc_dashboard_visuals import (
+    BarMetric,
+    render_bar_panel,
+    render_panel_grid,
+    render_range_panel,
+    render_scatter_panel,
+)
 
 
 SCHEMA_VERSION = 1
@@ -1314,6 +1321,66 @@ def _summary_row(sample: Mapping[str, object]) -> dict[str, object]:
     return {key: row.get(key) for key in QC_SUMMARY_COLUMNS}
 
 
+def derive_dashboard_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Add presentation-unit metrics without changing machine-readable values."""
+
+    def optional_number(value: object) -> float | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
+    derived: list[dict[str, object]] = []
+    for source in rows:
+        row = dict(source)
+        sample_assigned_reads = optional_number(source.get("sample_assigned_reads"))
+        assignment_fraction = optional_number(
+            source.get("sample_assignment_fraction")
+        )
+        usable_fragments = optional_number(source.get("mapq_filtered_fragments"))
+        peak_count = optional_number(source.get("peak_count"))
+        frip = optional_number(source.get("frip"))
+        covered_bases = optional_number(source.get("total_covered_bases"))
+        row.update({
+            "assigned_read_pairs_millions": (
+                sample_assigned_reads / 1_000_000
+                if sample_assigned_reads is not None else None
+            ),
+            "barcode_balance_percent": (
+                100 * assignment_fraction
+                if assignment_fraction is not None else None
+            ),
+            "usable_fragments_millions": (
+                usable_fragments / 1_000_000
+                if usable_fragments is not None else None
+            ),
+            "end_to_end_yield_percent": (
+                100 * usable_fragments / sample_assigned_reads
+                if (
+                    usable_fragments is not None
+                    and sample_assigned_reads is not None
+                    and sample_assigned_reads > 0
+                )
+                else None
+            ),
+            "peak_count_thousands": (
+                peak_count / 1_000 if peak_count is not None else None
+            ),
+            "frip_percent": 100 * frip if frip is not None else None,
+            "covered_megabases": (
+                covered_bases / 1_000_000
+                if covered_bases is not None else None
+            ),
+        })
+        derived.append(row)
+    return derived
+
+
 def _machine_tsv_value(value: object) -> str:
     if value is None:
         return ""
@@ -1921,7 +1988,9 @@ def _section(section_id: str, title: str, content: str) -> str:
 def render_dashboard(data: Mapping[str, object]) -> str:
     """Return a self-contained descriptive dashboard with inline SVG and tables."""
     samples = _samples(data)
-    summary_rows = [_summary_row(sample) for sample in samples]
+    summary_rows = derive_dashboard_rows(
+        [_summary_row(sample) for sample in samples]
+    )
     target_count = sum(not bool(sample.get("is_control")) for sample in samples)
     control_count = len(samples) - target_count
     counts = (
@@ -1958,7 +2027,51 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         empty_message="No input-family availability was recorded",
         aria_label="Input-family availability table",
     )
-    demux = render_bar_chart("Assigned read-pair fraction", summary_rows, value_key="assigned_fraction", axis_label="Fraction")
+    technical_metrics = (
+        BarMetric(
+            "assigned_read_pairs_millions",
+            "Assigned read pairs",
+            "Assigned pairs (millions)",
+        ),
+        BarMetric(
+            "barcode_balance_percent",
+            "Barcode balance within library",
+            "%",
+        ),
+        BarMetric("mapped_percent", "Mapped reads", "%"),
+        BarMetric(
+            "usable_fragments_millions",
+            "Usable fragments after filtering",
+            "Fragments (millions)",
+            log10_axis=True,
+        ),
+        BarMetric("duplicate_percent", "PCR duplication", "%"),
+        BarMetric(
+            "end_to_end_yield_percent",
+            "End-to-end usable yield",
+            "%",
+        ),
+    )
+    technical_grid = render_panel_grid(
+        [
+            render_bar_panel(
+                metric.title,
+                summary_rows,
+                value_key=metric.key,
+                axis_label=metric.axis_label,
+                value_multiplier=metric.value_multiplier,
+                log10_axis=metric.log10_axis,
+            )
+            for metric in technical_metrics
+        ],
+        aria_label="Sequencing and alignment QC panels",
+    )
+    demux = technical_grid + (
+        '<p class="panel-note">Barcode balance is each barcode&apos;s share '
+        'of assigned reads in its physical library. End-to-end usable yield '
+        'is MAPQ-filtered fragments divided by sample-assigned reads; '
+        'undefined denominators are shown as NA.</p>'
+    )
     demux += render_table(
         [("sample_id", "Sample"), ("total_read_pairs", "Total read pairs"),
          ("assigned_read_pairs", "Assigned read pairs"),
@@ -1972,8 +2085,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         summary_rows, empty_message="No demultiplexing metrics available",
         aria_label="Demultiplexing metrics table",
     )
-    alignment = render_bar_chart("Mapped reads", summary_rows, value_key="mapped_percent", axis_label="Percent")
-    alignment += render_table(
+    alignment = render_table(
         [("sample_id", "Sample"), ("raw_total_reads", "Raw reads"),
          ("mapped_percent", "Mapped (%)"),
          ("properly_paired_percent", "Properly paired (%)"),
@@ -2019,7 +2131,49 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         row_limit=2000,
     )
     peak_rows = [row for row in summary_rows if not row.get("is_control")]
-    peaks = render_bar_chart("FRiP", peak_rows, value_key="frip", axis_label="FRiP")
+    peak_grid = render_panel_grid(
+        [
+            render_bar_panel(
+                "Peak count",
+                peak_rows,
+                value_key="peak_count_thousands",
+                axis_label="Peaks (thousands)",
+            ),
+            render_bar_panel(
+                "Fraction of reads in peaks",
+                peak_rows,
+                value_key="frip_percent",
+                axis_label="%",
+            ),
+            render_bar_panel(
+                "Total bases covered by peaks",
+                peak_rows,
+                value_key="covered_megabases",
+                axis_label="Covered bases (Mb)",
+            ),
+            render_range_panel(
+                "Peak width median and range",
+                peak_rows,
+                minimum_key="peak_width_min",
+                q25_key="peak_width_q25",
+                median_key="peak_width_median",
+                q75_key="peak_width_q75",
+                maximum_key="peak_width_max",
+                axis_label="Peak width (bp)",
+            ),
+            render_scatter_panel(
+                "Peak count vs usable fragments",
+                peak_rows,
+                x_key="usable_fragments_millions",
+                y_key="peak_count_thousands",
+                x_axis_label="Usable fragments (millions)",
+                y_axis_label="Peaks (thousands)",
+                x_log10_axis=True,
+            ),
+        ],
+        aria_label="Peak QC panels",
+    )
+    peaks = peak_grid
     peaks += render_table(
         [("sample_id", "Sample"), ("peak_count", "Peak count"),
          ("total_covered_bases", "Covered bases"),
@@ -2064,7 +2218,18 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         }
         for sample in samples if isinstance(_nested(sample, "tss").get("profile"), Sequence)
     }
-    tss = render_line_chart("TSS profiles", profiles)
+    tss = render_panel_grid(
+        [
+            render_bar_panel(
+                "TSS enrichment score",
+                summary_rows,
+                value_key="tss_enrichment",
+                axis_label="TSS enrichment score",
+            ),
+        ],
+        aria_label="TSS score panel",
+    )
+    tss += render_line_chart("TSS profiles", profiles)
     tss += render_table(
         [("sample_id", "Sample"), ("tss_status", "Status"), ("tss_enrichment", "TSS enrichment")],
         summary_rows, empty_message="No TSS metrics available",
@@ -2112,7 +2277,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Consolidated QC dashboard</title><style>
 body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1100px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
-.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}.table-note{color:#475569;font-size:.9rem}
+.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.panel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,24rem),1fr));gap:1rem;margin:.75rem 0}.qc-panel{min-width:0;border:1px solid #dbe3ee;border-radius:.4rem;padding:.75rem;background:#fff}.qc-panel h3{font-size:1rem;margin-bottom:.35rem}.panel-scroll{max-width:100%;overflow-x:auto}.panel-chart{display:block;height:auto}.axis-grid{stroke:#dbe3ee;stroke-width:1}.axis-tick-label{fill:#475569;font-size:11px}.axis-title{fill:#334155;font-size:12px}.bar-value,.scatter-label{font-size:11px;font-weight:600}.sample-label{font-size:10px}.range-min-max,.range-iqr,.range-median,.scatter-leader,.scatter-point{vector-effect:non-scaling-stroke}.panel-note,.table-note{color:#475569;font-size:.9rem}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}
 </style></head><body><main><h1>Consolidated QC dashboard</h1><p>Descriptive technical and biological QC summary; no biological thresholds are applied.</p>""" + body + "</main></body></html>"
 
 
