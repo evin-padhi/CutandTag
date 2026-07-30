@@ -1228,6 +1228,60 @@ class DashboardOutputTests(unittest.TestCase):
         ]
         return data
 
+    def test_representative_fixture_renders_twelve_samples_and_all_approved_panels(self):
+        """The visual-QA fixture must exercise the complete offline dashboard."""
+        workspace = self.make_workspace()
+        output = workspace / "qc-dashboard-visual.html"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "tests" / "render_qc_dashboard_fixture.py"),
+                str(output),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(output.is_file())
+        html_document = output.read_text(encoding="utf-8")
+        self.assertGreater(len(html_document), 10_000)
+        self.assertTrue(html_document.startswith("<!doctype html>"))
+        self.assertNotRegex(
+            html_document,
+            r'''(?:src|href)=["']https?://|url\(\s*["']?https?://''',
+        )
+        for sample_id in (
+            "701_IgG", "702_IgG", "703_IgG",
+            "701_CTCF", "702_CTCF", "703_CTCF",
+            "704_GATA1", "705_GATA1", "706_GATA1",
+            "704_RUNX1", "705_RUNX1", "706_RUNX1",
+        ):
+            with self.subTest(sample_id=sample_id):
+                self.assertIn(f">{sample_id}<", html_document)
+        for section_id in (
+            "demultiplexing", "alignment", "insert-size-distribution",
+            "peaks-frip", "peak-width-distribution", "tss-enrichment",
+            "motif-enrichment",
+        ):
+            with self.subTest(section_id=section_id):
+                self.assertIn(f'<section id="{section_id}">', html_document)
+        for panel_title in (
+            "Assigned read pairs", "Barcode balance within library",
+            "Mapped reads", "Usable fragments after filtering",
+            "PCR duplication", "End-to-end usable yield",
+            "Peak count", "Fraction of reads in peaks",
+            "Total bases covered by peaks", "Peak width median and range",
+            "Peak count vs usable fragments", "Fragments per peak",
+            "Insert-size distribution", "Peak-width distribution",
+            "TSS enrichment score", "TSS profiles",
+            "Motif enrichment heatmap",
+        ):
+            with self.subTest(panel_title=panel_title):
+                self.assertIn(panel_title, html_document)
+
     def test_dashboard_derived_rows_use_approved_units_and_denominators(self):
         """A wrong denominator or silent zero would misstate library yield."""
         rows = qc.derive_dashboard_rows([
