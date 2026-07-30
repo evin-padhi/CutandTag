@@ -110,9 +110,14 @@ def _count(value: object, *, label: str) -> int | float:
 
 
 def read_demultiplex_metrics(
-    paths: Sequence[Path], metadata: Mapping[str, Mapping[str, object]]
+    paths: Sequence[Path], metadata: Mapping[str, Mapping[str, object]] | None = None
 ) -> dict[str, dict[str, object]]:
-    """Read physical-library count summaries and derive their fractions."""
+    """Read physical-library count summaries and derive their fractions.
+
+    Legacy inputs carry a ``library_id`` and can be parsed alone.  The current
+    producer format omits it, so callers must supply validated sample metadata
+    to recover the unique physical-library identity from ``assignment_counts``.
+    """
     parsed: dict[str, dict[str, object]] = {}
     for path in paths:
         raw = _read_json(path, label="demultiplex metrics")
@@ -129,7 +134,7 @@ def read_demultiplex_metrics(
         for sample_id, count in raw_assignments.items():
             if not isinstance(sample_id, str) or not sample_id.strip():
                 raise DashboardInputError(f"{path}: assignment_counts sample_id is required")
-            if sample_id not in metadata:
+            if metadata is not None and sample_id not in metadata:
                 raise DashboardInputError(
                     f"assignment_counts reference unknown sample_id {sample_id}"
                 )
@@ -142,25 +147,35 @@ def read_demultiplex_metrics(
             raise DashboardInputError(
                 "assigned_reads, ambiguous_reads, and unassigned_reads must sum to total_reads"
             )
-        inferred_library_ids = {
-            _required_text(metadata[sample_id], "library_id", label=f"metadata {sample_id}")
-            for sample_id in assignment_counts
-        }
+        inferred_library_ids = (
+            {
+                _required_text(metadata[sample_id], "library_id", label=f"metadata {sample_id}")
+                for sample_id in assignment_counts
+            }
+            if metadata is not None else set()
+        )
         explicit_library_id = raw.get("library_id")
         if explicit_library_id is not None:
             if not isinstance(explicit_library_id, str) or not explicit_library_id.strip():
                 raise DashboardInputError("demultiplex metrics library_id is required when supplied")
             library_id = explicit_library_id.strip()
-            if library_id not in {
-                _required_text(record, "library_id", label=f"metadata {sample_id}")
-                for sample_id, record in metadata.items()
-            }:
-                raise DashboardInputError(f"demultiplex metrics reference unknown library_id {library_id}")
-            if inferred_library_ids and inferred_library_ids != {library_id}:
-                raise DashboardInputError(
-                    f"assignment_counts do not match library_id {library_id}"
-                )
+            if metadata is not None:
+                if library_id not in {
+                    _required_text(record, "library_id", label=f"metadata {sample_id}")
+                    for sample_id, record in metadata.items()
+                }:
+                    raise DashboardInputError(
+                        f"demultiplex metrics reference unknown library_id {library_id}"
+                    )
+                if inferred_library_ids and inferred_library_ids != {library_id}:
+                    raise DashboardInputError(
+                        f"assignment_counts do not match library_id {library_id}"
+                    )
         else:
+            if metadata is None:
+                raise DashboardInputError(
+                    "validated metadata is required to infer library_id from assignment_counts"
+                )
             if len(inferred_library_ids) != 1:
                 raise DashboardInputError(
                     "assignment_counts map to multiple library_id values"

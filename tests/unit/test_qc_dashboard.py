@@ -134,6 +134,35 @@ class MetadataAndTableParserTests(unittest.TestCase):
         self.assertEqual(rows["L1"]["assigned_fraction"], 0.8)
         self.assertEqual(rows["L1"]["assignment_counts"]["S1"], 30)
 
+    def test_read_demultiplex_metrics_preserves_one_argument_embedded_identity_api(self):
+        """The declared public parser accepts legacy JSON carrying library_id."""
+        workspace = self.make_workspace()
+        path = workspace / "demultiplex.metrics.json"
+        path.write_text(json.dumps({
+            "library_id": "L1", "total_reads": 100, "assigned_reads": 80,
+            "ambiguous_reads": 5, "unassigned_reads": 15,
+            "assignment_counts": {"S1": 30, "S2": 50},
+        }), encoding="utf-8")
+
+        rows = qc.read_demultiplex_metrics([path])
+
+        self.assertEqual(rows["L1"]["assigned_fraction"], 0.8)
+
+    def test_read_demultiplex_metrics_requires_metadata_for_producer_schema_without_identity(self):
+        """Producer JSON lacks library_id, so its identity cannot be inferred alone."""
+        workspace = self.make_workspace()
+        path = workspace / "demultiplex.metrics.json"
+        path.write_text(json.dumps({
+            "total_reads": 100, "assigned_reads": 80,
+            "ambiguous_reads": 5, "unassigned_reads": 15,
+            "assignment_counts": {"S1": 30, "S2": 50},
+        }), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            qc.DashboardInputError, "validated metadata is required to infer library_id"
+        ):
+            qc.read_demultiplex_metrics([path])
+
     def test_read_demultiplex_metrics_rejects_duplicate_library_ids(self):
         """A library must contribute exactly one unambiguous count record."""
         workspace = self.make_workspace()
