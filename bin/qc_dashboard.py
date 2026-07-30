@@ -622,7 +622,7 @@ def write_tss_profiles_tsv(data: Mapping[str, object], path: Path) -> None:
     _write_tsv(path, TSS_PROFILE_COLUMNS, _tss_profile_rows(data))
 
 
-def render_table(columns, rows, *, empty_message):
+def render_table(columns, rows, *, empty_message, aria_label):
     """Render an escaped HTML table, including an explicit empty-state message."""
     if not rows:
         return f'<p class="empty">{html.escape(empty_message)}</p>'
@@ -638,7 +638,7 @@ def render_table(columns, rows, *, empty_message):
     )
     return (
         '<div class="table-scroll" role="region" '
-        'aria-label="Scrollable data table" tabindex="0">'
+        f'aria-label="{html.escape(aria_label)}" tabindex="0">'
         f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
         "</div>"
     )
@@ -708,7 +708,7 @@ def render_line_chart(title: str, profiles: Mapping[str, object]) -> str:
                 points.append((str(sample_id), int(position), numeric_signal, is_control))
     if not points:
         return f'<p class="empty">{html.escape("No TSS profile data available")}</p>'
-    width, height, left, bottom = 640, 260, 60, 46
+    width, left, bottom = 640, 60, 46
     x_min, x_max = min(point[1] for point in points), max(point[1] for point in points)
     y_max = max(point[2] for point in points) or 1.0
     x_span = x_max - x_min or 1
@@ -717,11 +717,16 @@ def render_line_chart(title: str, profiles: Mapping[str, object]) -> str:
         if sample_id not in grouped:
             grouped[sample_id] = (is_control, [])
         grouped[sample_id][1].append((position, signal))
+    label_top, label_spacing, label_bottom_padding = 36, 20, 20
+    last_label_y = label_top + (len(grouped) - 1) * label_spacing
+    height = max(260, last_label_y + label_bottom_padding)
+    plot_bottom = height - bottom
+    plot_height = plot_bottom - 32
     palette = ("#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c")
     paths = []
     for index, (sample_id, (is_control, profile)) in enumerate(sorted(grouped.items())):
         coordinates = " ".join(
-            f"{left + (position - x_min) / x_span * (width - left - 24):.1f},{height - bottom - signal / y_max * (height - bottom - 32):.1f}"
+            f"{left + (position - x_min) / x_span * (width - left - 24):.1f},{plot_bottom - signal / y_max * plot_height:.1f}"
             for position, signal in sorted(profile)
         )
         color = palette[index % len(palette)]
@@ -731,14 +736,14 @@ def render_line_chart(title: str, profiles: Mapping[str, object]) -> str:
         paths.append(
             f'<polyline data-sample-kind="{kind}" points="{coordinates}" fill="none" stroke="{color}" stroke-width="2"{dash}>'
             f'<title>{html.escape(tooltip)}</title></polyline>'
-            f'<text x="{width - 18}" y="{36 + index * 20}" text-anchor="end" fill="{color}">{html.escape(sample_id)}</text>'
+            f'<text x="{width - 18}" y="{label_top + index * label_spacing}" text-anchor="end" fill="{color}">{html.escape(sample_id)}</text>'
         )
     return (
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(title)}">'
         f'<title>{html.escape(title)}</title><text x="{left}" y="18" class="chart-title">{html.escape(title)}</text>'
         f'<text x="16" y="{height / 2:.1f}" transform="rotate(-90 16 {height / 2:.1f})">Signal</text>'
         f'<text x="{width / 2:.1f}" y="{height - 6}" text-anchor="middle">Position relative to TSS (bp)</text>'
-        f'<line x1="{left}" y1="{height - bottom}" x2="{width - 18}" y2="{height - bottom}" class="axis"/>'
+        f'<line x1="{left}" y1="{plot_bottom}" x2="{width - 18}" y2="{plot_bottom}" class="axis"/>'
         + "".join(paths) + "</svg>"
     )
 
@@ -756,24 +761,28 @@ def render_dashboard(data: Mapping[str, object]) -> str:
          ("annotation_status", "Annotation status")],
         [{**sample, "annotation_status": data.get("annotation_status")} for sample in samples],
         empty_message="No samples were supplied",
+        aria_label="Run overview table",
     )
     demux = render_bar_chart("Assigned read-pair fraction", summary_rows, value_key="assigned_fraction", axis_label="Fraction")
     demux += render_table(
         [("sample_id", "Sample"), ("assigned_fraction", "Assigned fraction"),
          ("ambiguous_fraction", "Ambiguous fraction"), ("unassigned_fraction", "Unassigned fraction")],
         summary_rows, empty_message="No demultiplexing metrics available",
+        aria_label="Demultiplexing metrics table",
     )
     alignment = render_bar_chart("Mapped reads", summary_rows, value_key="mapped_percent", axis_label="Percent")
     alignment += render_table(
         [("sample_id", "Sample"), ("mapped_percent", "Mapped (%)"),
          ("properly_paired_percent", "Properly paired (%)")],
         summary_rows, empty_message="No alignment metrics available",
+        aria_label="Alignment and library QC table",
     )
     peak_rows = [row for row in summary_rows if not row.get("is_control")]
     peaks = render_bar_chart("FRiP", peak_rows, value_key="frip", axis_label="FRiP")
     peaks += render_table(
         [("sample_id", "Sample"), ("peak_count", "Peak count"), ("frip", "FRiP")],
         peak_rows, empty_message="No target peak metrics available",
+        aria_label="Peaks and FRiP table",
     )
     profiles = {
         str(sample.get("sample_id", "")): {
@@ -786,22 +795,26 @@ def render_dashboard(data: Mapping[str, object]) -> str:
     tss += render_table(
         [("sample_id", "Sample"), ("tss_status", "Status"), ("tss_enrichment", "TSS enrichment")],
         summary_rows, empty_message="No TSS metrics available",
+        aria_label="TSS enrichment table",
     )
     motif_rows = _top_motif_rows(data)
     expected = render_table(
         [("sample_id", "Sample"), ("expected_motif", "Expected motif"),
          ("expected_motif_status", "Expected motif status"), ("best_motif_id", "Best motif")],
         peak_rows, empty_message="No target motif metrics available",
+        aria_label="Expected motif table",
     )
     expected += "<h3>Top AME motifs</h3>" + render_table(
         [("sample_id", "Sample"), ("rank", "Rank"), ("motif_id", "Motif"),
          ("motif_alt_id", "Alternate ID"), ("adjusted_p_value", "Adjusted p-value")],
         motif_rows, empty_message="No AME motifs available",
+        aria_label="Top AME motifs table",
     )
     warnings = data.get("warnings", [])
     warning_rows = warnings if isinstance(warnings, list) else []
     warning_section = render_table(
         [("message", "Warning")], warning_rows, empty_message="No warnings recorded",
+        aria_label="Warnings table",
     )
     body = "".join((
         _section("run-overview", "Run overview", overview),

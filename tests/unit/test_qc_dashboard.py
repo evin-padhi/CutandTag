@@ -615,12 +615,34 @@ class DashboardOutputTests(unittest.TestCase):
             html.count("<table>"),
             html.count(
                 '<div class="table-scroll" role="region" '
-                'aria-label="Scrollable data table" tabindex="0"><table>'
+                'aria-label="'
             ),
         )
         self.assertIn(
             ".table-scroll{max-width:100%;overflow-x:auto}",
             html,
+        )
+
+    def test_dashboard_tables_have_unique_context_specific_accessible_names(self):
+        """Assistive technology must distinguish all eight scrollable data regions."""
+        html = qc.render_dashboard(self.report_data())
+
+        self.assertEqual(
+            re.findall(
+                r'<div class="table-scroll" role="region" '
+                r'aria-label="([^"]+)" tabindex="0">',
+                html,
+            ),
+            [
+                "Run overview table",
+                "Demultiplexing metrics table",
+                "Alignment and library QC table",
+                "Peaks and FRiP table",
+                "TSS enrichment table",
+                "Expected motif table",
+                "Top AME motifs table",
+                "Warnings table",
+            ],
         )
 
     def test_line_chart_series_labels_have_nonoverlapping_vertical_spacing(self):
@@ -641,10 +663,47 @@ class DashboardOutputTests(unittest.TestCase):
                 chart,
             )
         }
+        self.assertIn('viewBox="0 0 640 260"', chart)
         self.assertEqual(set(label_positions), {"A_IGG", "Z_TARGET"})
         self.assertGreaterEqual(
             label_positions["Z_TARGET"] - label_positions["A_IGG"],
             20,
+        )
+
+    def test_line_chart_expands_to_keep_twelve_series_labels_inside_viewbox(self):
+        """Large cohorts need every nonoverlapping label fully inside the SVG."""
+        chart = qc.render_line_chart(
+            "TSS profiles",
+            {
+                f"S{index:02d}": {
+                    "profile": [(-10, 1), (10, index + 1)],
+                    "is_control": index == 0,
+                }
+                for index in range(12)
+            },
+        )
+
+        viewbox = re.search(r'viewBox="0 0 640 ([0-9.]+)"', chart)
+        self.assertIsNotNone(viewbox)
+        height = float(viewbox.group(1))
+        label_positions = [
+            float(position)
+            for position in re.findall(
+                r'<text x="622" y="([0-9.]+)" text-anchor="end" '
+                r'fill="[^"]+">S[0-9]+</text>',
+                chart,
+            )
+        ]
+        self.assertEqual(len(label_positions), 12)
+        self.assertGreater(height, 260)
+        self.assertTrue(
+            all(20 <= position <= height - 20 for position in label_positions)
+        )
+        self.assertTrue(
+            all(
+                right - left >= 20
+                for left, right in zip(label_positions, label_positions[1:])
+            )
         )
 
     def test_cli_publishes_a_complete_output_set_and_reports_input_errors(self):
