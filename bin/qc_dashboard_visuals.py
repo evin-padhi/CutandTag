@@ -300,11 +300,17 @@ def render_motif_heatmap(matrix: Mapping[str, object]) -> str:
                 str(adjusted)
                 if _numeric(adjusted) is not None else "NA"
             )
+            state = str(cell.get("state") or (
+                "computed" if _numeric(adjusted) is not None else "unavailable"
+            ))
+            reason = str(cell.get("reason") or "").strip()
             accessible_name = (
                 f"{sample_id}; {motif_id} {motif_alt_id}".rstrip()
-                + f"; adjusted p-value {adjusted_label}"
-                + f"; −log10 adjusted p-value {_exact_number(score)}"
+                + f"; AME adjusted significance {adjusted_label}"
+                + f"; −log10 AME adjusted significance {_exact_number(score)}"
                 + f"; {'cognate' if cognate else 'noncognate'}"
+                + f"; {state}"
+                + (f": {reason}" if reason else "")
             )
             cell_class = "heatmap-cell cognate" if cognate else "heatmap-cell"
             text_color = "#FFFFFF" if score >= 36.0 else "#172033"
@@ -332,7 +338,8 @@ def render_motif_heatmap(matrix: Mapping[str, object]) -> str:
         '<stop offset="100%" stop-color="#1D4ED8"/>'
         "</linearGradient></defs>"
         f'<text class="heatmap-legend-title" x="{legend_x:.1f}" '
-        f'y="{legend_y:.1f}">−log10 adjusted p-value (capped at 60)</text>'
+        f'y="{legend_y:.1f}">−log10 AME adjusted significance '
+        "(capped at 60)</text>"
         f'<rect class="heatmap-legend" x="{legend_x:.1f}" '
         f'y="{legend_y + 10:.1f}" width="{legend_width:.1f}" height="12" '
         'fill="url(#motif-significance-gradient)"/>'

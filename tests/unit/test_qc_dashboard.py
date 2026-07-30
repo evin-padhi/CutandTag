@@ -952,6 +952,56 @@ class TssAndAmeTests(unittest.TestCase):
             matrix["cells"][("GATA_sample", motif_key)]["score"], 3.0
         )
 
+    def test_build_motif_heatmap_preserves_cell_reasons_and_cap_boundary(self):
+        """Missing motifs and unavailable AME runs must not collapse into one ``ns``."""
+        motif = {
+            "motif_id": "MA_CTCF", "motif_alt_id": "CTCF",
+            "adjusted_p_value": 1e-60,
+        }
+        samples = [
+            {
+                "sample_id": "PRESENT", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "computed"},
+                "ame_motifs": [motif],
+            },
+            {
+                "sample_id": "MISSING_MOTIF", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "computed"},
+                "ame_motifs": [],
+            },
+            {
+                "sample_id": "NO_PEAKS", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "no_peaks"},
+                "ame_motifs": [],
+            },
+            {
+                "sample_id": "FAILED", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "failed"},
+                "ame_motifs": [],
+            },
+        ]
+
+        matrix = qc.build_motif_heatmap(samples, noncognate_limit=0)
+        motif_key = ("MA_CTCF", "CTCF")
+        cells = matrix["cells"]
+
+        self.assertEqual(cells[("PRESENT", motif_key)]["label"], ">60")
+        self.assertEqual(cells[("PRESENT", motif_key)]["state"], "computed")
+        self.assertEqual(
+            cells[("MISSING_MOTIF", motif_key)]["reason"],
+            "motif absent from AME results",
+        )
+        self.assertEqual(cells[("MISSING_MOTIF", motif_key)]["state"], "missing_motif")
+        self.assertEqual(cells[("NO_PEAKS", motif_key)]["state"], "no_peaks")
+        self.assertEqual(
+            cells[("NO_PEAKS", motif_key)]["reason"],
+            "AME unavailable because no peaks were called",
+        )
+        self.assertEqual(cells[("FAILED", motif_key)]["state"], "unavailable")
+        self.assertEqual(
+            cells[("FAILED", motif_key)]["reason"], "AME unavailable: failed"
+        )
+
 
 class ReportDataTests(unittest.TestCase):
     def test_build_report_data_joins_target_and_preserves_control_optional_gaps(self):
@@ -1599,6 +1649,28 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertIn('stroke="#2F78D1"', tss_section)
         self.assertIn('class="endpoint-label"', tss_section)
 
+    def test_tss_score_panel_sorts_by_score_and_explains_the_calculation(self):
+        """TSS bars must rank scores and make the scalar definition visible."""
+        data = self.report_data()
+        data["samples_by_id"]["A_IGG"]["tss"]["enrichment"] = None
+
+        dashboard = qc.render_dashboard(data)
+        tss_section = dashboard[
+            dashboard.index('id="tss-enrichment"'):
+            dashboard.index('id="motif-enrichment"')
+        ]
+        score_panel = tss_section[
+            tss_section.index("<h3>TSS enrichment score</h3>"):
+            tss_section.index("<h3>TSS profiles</h3>")
+        ]
+
+        self.assertLess(score_panel.index("Z_TARGET"), score_panel.index("A_IGG"))
+        self.assertIn(
+            "center 0-bp bin signal divided by the mean signal across the "
+            "terminal 100-bp flank at each end of the profile",
+            tss_section,
+        )
+
     def test_dashboard_renders_target_only_heatmap_and_displayed_cell_table(self):
         data = self.report_data()
         target = data["samples_by_id"]["Z_TARGET"]
@@ -1642,7 +1714,8 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertEqual(compact_table.group().count("<tr>"), 12)
         for heading in (
             "Sample", "Motif", "Alternate ID", "Rank",
-            "Adjusted p-value", "Transformed significance", "Cognate",
+            "AME adjusted significance", "−log10 AME adjusted significance",
+            "State", "Reason", "Cognate",
         ):
             self.assertIn(heading, compact_table.group())
 
@@ -1724,9 +1797,9 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertNotIn('class="qc-pass"', html)
         self.assertNotIn('class="qc-fail"', html)
         for visible_text in (
-            "NA", "Targets (solid)", "IgG controls (outlined)",
-            "Bar charts — Targets (solid)",
-            "Line charts use the per-series swatches",
+            "NA", "Bar charts — targets use assay colors",
+            "IgG controls use grey with heavier outlines",
+            "Line charts use target colors and sample-specific strokes",
             "CTCF &amp; &lt;target&gt;", "M01 &amp; &lt;motif&gt;",
             "NA warning &amp; &lt;visible&gt;",
         ):
@@ -1906,6 +1979,31 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertIn(".panel-grid{", rendered)
         self.assertIn("@media (max-width:", rendered)
         self.assertIn("@media print{", rendered)
+
+    def test_print_layout_stacks_panels_scales_svgs_and_keeps_details_collapsed(self):
+        """Printing must not clip wide charts or silently expand huge tables."""
+        rendered = qc.render_dashboard(self.report_data())
+        print_css = rendered[
+            rendered.index("@media print{"):
+            rendered.index("</style>")
+        ]
+
+        self.assertIn(
+            ".panel-grid{grid-template-columns:minmax(0,1fr)}",
+            print_css,
+        )
+        self.assertIn("svg{max-width:100%;height:auto}", print_css)
+        self.assertIn("break-before:page", print_css)
+        self.assertIn(
+            "details:not([open])>:not(summary){display:none!important}",
+            print_css,
+        )
+        self.assertNotIn(
+            "details:not([open])>:not(summary){display:block}",
+            print_css,
+        )
+        self.assertNotIn("IgG controls (outlined) and hatched", rendered)
+        self.assertIn("IgG controls use grey with heavier outlines", rendered)
 
     def test_dashboard_tables_have_unique_context_specific_accessible_names(self):
         """Assistive technology must distinguish every scrollable data region."""

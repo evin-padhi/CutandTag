@@ -878,6 +878,11 @@ def build_motif_heatmap(
     for sample in targets:
         sample_id = str(sample.get("sample_id", ""))
         expected = sample.get("expected_motif")
+        motif = sample.get("motif")
+        ame_status = (
+            str(motif.get("ame_status") or "").strip()
+            if isinstance(motif, Mapping) else ""
+        )
         for key in normalized_keys:
             display = display_by_key[key]
             record = records_by_sample[sample_id].get(key)
@@ -894,17 +899,47 @@ def build_motif_heatmap(
                 score = significance_cap
                 label = f">{format(significance_cap, 'g')}"
             elif significant:
-                score = min(-math.log10(float(adjusted)), significance_cap)
-                label = format(score, ".3g")
+                uncapped_score = -math.log10(float(adjusted))
+                score = min(uncapped_score, significance_cap)
+                label = (
+                    f">{format(significance_cap, 'g')}"
+                    if uncapped_score >= significance_cap
+                    else format(score, ".3g")
+                )
             else:
                 score = 0.0
                 label = "ns"
+            adjusted_is_numeric = (
+                not isinstance(adjusted, bool)
+                and isinstance(adjusted, (int, float))
+                and math.isfinite(float(adjusted))
+            )
+            if isinstance(record, Mapping) and adjusted_is_numeric:
+                state = "computed"
+                reason = (
+                    "AME adjusted significance exceeds 0.1"
+                    if not significant else ""
+                )
+            elif isinstance(record, Mapping):
+                state = "unavailable"
+                reason = "AME adjusted significance unavailable"
+            elif ame_status == "no_peaks":
+                state = "no_peaks"
+                reason = "AME unavailable because no peaks were called"
+            elif not ame_status or ame_status == "computed":
+                state = "missing_motif"
+                reason = "motif absent from AME results"
+            else:
+                state = "unavailable"
+                reason = f"AME unavailable: {ame_status}"
             cells[(sample_id, display)] = {
                 "score": score,
                 "label": label,
                 "adjusted_p_value": adjusted,
                 "rank": record.get("rank") if isinstance(record, Mapping) else None,
                 "outlined": is_cognate_motif(expected, *display),
+                "state": state,
+                "reason": reason,
             }
 
     return {
@@ -1643,6 +1678,8 @@ def _motif_heatmap_rows(matrix: Mapping[str, object]) -> list[dict[str, object]]
                 "rank": cell.get("rank"),
                 "adjusted_p_value": cell.get("adjusted_p_value"),
                 "transformed_significance": cell.get("score"),
+                "state": cell.get("state"),
+                "reason": cell.get("reason"),
                 "cognate": bool(cell.get("outlined")),
             })
     return rows
@@ -2392,16 +2429,39 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         str(sample.get("sample_id", "")): _nested(sample, "tss").get("profile", [])
         for sample in samples if isinstance(_nested(sample, "tss").get("profile"), Sequence)
     }
+    def tss_score_sort(row: Mapping[str, object]) -> tuple[object, ...]:
+        raw_score = row.get("tss_enrichment")
+        score = (
+            float(raw_score)
+            if (
+                not isinstance(raw_score, bool)
+                and isinstance(raw_score, (int, float))
+                and math.isfinite(float(raw_score))
+            )
+            else None
+        )
+        return (
+            score is None,
+            -score if score is not None else 0.0,
+            str(row.get("sample_id", "")),
+        )
+
+    tss_rows = sorted(summary_rows, key=tss_score_sort)
     tss = render_panel_grid(
         [
             render_bar_panel(
                 "TSS enrichment score",
-                summary_rows,
+                tss_rows,
                 value_key="tss_enrichment",
                 axis_label="TSS enrichment score",
             ),
         ],
         aria_label="TSS score panel",
+    )
+    tss += (
+        '<p class="panel-note">TSS enrichment is the center 0-bp bin signal '
+        'divided by the mean signal across the terminal 100-bp flank at each '
+        'end of the profile.</p>'
     )
     tss += render_profile_chart(
         "TSS profiles",
@@ -2415,7 +2475,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         render_table(
             [("sample_id", "Sample"), ("tss_status", "Status"),
              ("tss_enrichment", "TSS enrichment")],
-            summary_rows, empty_message="No TSS metrics available",
+            tss_rows, empty_message="No TSS metrics available",
             aria_label="TSS enrichment table",
             exact_keys={"sample_id", "tss_status"},
         ),
@@ -2428,14 +2488,19 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         render_table(
             [("sample_id", "Sample"), ("motif_id", "Motif"),
              ("motif_alt_id", "Alternate ID"), ("rank", "Rank"),
-             ("adjusted_p_value", "Adjusted p-value"),
-             ("transformed_significance", "Transformed significance"),
+             ("adjusted_p_value", "AME adjusted significance"),
+             (
+                 "transformed_significance",
+                 "−log10 AME adjusted significance",
+             ),
+             ("state", "State"), ("reason", "Reason"),
              ("cognate", "Cognate")],
             _motif_heatmap_rows(motif_matrix),
             empty_message="No displayed motif cells available",
             aria_label="Displayed motif cells table",
             exact_keys={
-                "sample_id", "motif_id", "motif_alt_id", "rank", "cognate",
+                "sample_id", "motif_id", "motif_alt_id", "rank",
+                "state", "reason", "cognate",
             },
         ),
     )
@@ -2460,7 +2525,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         render_table(
             [("sample_id", "Sample"), ("rank", "Rank"), ("motif_id", "Motif"),
              ("motif_alt_id", "Alternate ID"),
-             ("adjusted_p_value", "Adjusted p-value")],
+             ("adjusted_p_value", "AME adjusted significance")],
             motif_rows, empty_message="No AME motifs available",
             aria_label="Top AME motifs table",
             exact_keys={"sample_id", "rank", "motif_id", "motif_alt_id"},
@@ -2478,8 +2543,9 @@ def render_dashboard(data: Mapping[str, object]) -> str:
     body = "".join((
         _section("run-overview", "Run overview", counts + overview),
         _section("input-availability", "Input-family availability", availability),
-        '<p class="legend">Bar charts — Targets (solid); IgG controls (outlined) '
-        'and hatched. Line charts use the per-series swatches.</p>',
+        '<p class="legend">Bar charts — targets use assay colors; IgG controls '
+        'use grey with heavier outlines. Line charts use target colors and '
+        'sample-specific strokes shown in each plot.</p>',
         _section("demultiplexing", "Demultiplexing", demux),
         _section("alignment", "Alignment and library QC", alignment),
         _section("insert-size-distribution", "Insert-size distribution", insert),
@@ -2497,7 +2563,7 @@ body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;ba
 .heatmap-scroll{max-width:100%;overflow-x:auto}.motif-heatmap{display:block;width:auto;min-width:100%;height:auto}.heatmap-cell{stroke:#dbe3ee;stroke-width:1}.heatmap-cell.cognate{stroke:#172033;stroke-width:3}.heatmap-sample-label{font-size:11px;font-weight:700}.heatmap-motif-label{font-size:11px}.heatmap-cell-label{font-size:10px;font-weight:600;pointer-events:none}.heatmap-legend-title,.heatmap-legend-tick{font-size:11px}.data-details{margin:.75rem 0}.data-details summary{cursor:pointer;font-weight:700}.table-scroll:focus-visible,.panel-scroll:focus-visible,.chart-scroll:focus-visible,.heatmap-scroll:focus-visible,.data-details summary:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
 @media (max-width:900px){.panel-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media (max-width:640px){main{padding:.75rem}.panel-grid{grid-template-columns:minmax(0,1fr)}section{padding:.75rem}}
-@media print{body{background:#fff}main{max-width:none;padding:0}section,.qc-panel,.data-details{break-inside:avoid;page-break-inside:avoid}.table-scroll,.panel-scroll,.chart-scroll,.heatmap-scroll{overflow:visible}details:not([open])>:not(summary){display:block}.data-details summary{display:none}}
+@media print{body{background:#fff}main{max-width:none;padding:0}.panel-grid{grid-template-columns:minmax(0,1fr)}svg{max-width:100%;height:auto}.panel-chart,.motif-heatmap,.chart-wide{width:100%;min-width:0;max-width:100%;height:auto}section{break-inside:auto;page-break-inside:auto}#demultiplexing,#insert-size-distribution,#peaks-frip,#peak-width-distribution,#tss-enrichment,#motif-enrichment{break-before:page;page-break-before:always}.qc-panel,.panel-scroll,.chart-scroll,.heatmap-scroll{break-inside:avoid;page-break-inside:avoid}.table-scroll,.panel-scroll,.chart-scroll,.heatmap-scroll{overflow:visible}details:not([open])>:not(summary){display:none!important}.data-details summary{display:list-item}}
 </style></head><body><main><h1>Consolidated QC dashboard</h1><p>Descriptive technical and biological QC summary; no biological thresholds are applied.</p>""" + body + "</main></body></html>"
 
 

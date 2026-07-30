@@ -121,6 +121,8 @@ class MotifHeatmapRenderingTests(unittest.TestCase):
                     "score": 0.0,
                     "label": "ns",
                     "adjusted_p_value": None,
+                    "state": "no_peaks",
+                    "reason": "AME unavailable because no peaks were called",
                     "outlined": False,
                 },
             },
@@ -133,7 +135,7 @@ class MotifHeatmapRenderingTests(unittest.TestCase):
         self.assertIn('class="heatmap-cell cognate"', heatmap)
         self.assertIn(">60<", heatmap)
         self.assertIn(">ns<", heatmap)
-        self.assertIn("−log10 adjusted p-value (capped at 60)", heatmap)
+        self.assertIn("−log10 AME adjusted significance (capped at 60)", heatmap)
         self.assertIn('class="heatmap-scroll"', heatmap)
         self.assertIn('data-cell-width="64"', heatmap)
 
@@ -157,9 +159,15 @@ class MotifHeatmapRenderingTests(unittest.TestCase):
         self.assertEqual(len(cell_titles), 4)
         self.assertEqual(len(cell_titles), len(set(cell_titles)))
         self.assertIn(
-            "NX704_GATA1; MA0139.1 CTCF; adjusted p-value "
+            "NX704_GATA1; MA0139.1 CTCF; AME adjusted significance "
             "0.12345678901234566; "
-            "−log10 adjusted p-value 0; noncognate",
+            "−log10 AME adjusted significance 0; noncognate; computed",
+            cell_titles,
+        )
+        self.assertIn(
+            "NX704_GATA1; MA0000.1 OTHER; AME adjusted significance NA; "
+            "−log10 AME adjusted significance 0; noncognate; "
+            "no_peaks: AME unavailable because no peaks were called",
             cell_titles,
         )
 
