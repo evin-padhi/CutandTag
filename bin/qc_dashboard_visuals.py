@@ -726,6 +726,30 @@ def _series_metadata(
     )
 
 
+def _allocate_series_styles(
+    sample_ids: Sequence[str],
+    metadata: Mapping[str, Mapping[str, object]],
+) -> dict[str, SeriesStyle]:
+    """Allocate collision-free line styles within each assay target."""
+    grouped: dict[str, list[str]] = {}
+    for sample_id in sample_ids:
+        assay_target, _, _ = _series_metadata(sample_id, metadata)
+        grouped.setdefault(_normalized_target(assay_target), []).append(sample_id)
+
+    allocated: dict[str, SeriesStyle] = {}
+    for target_sample_ids in grouped.values():
+        for index, sample_id in enumerate(sorted(target_sample_ids)):
+            _, _, base_style = _series_metadata(sample_id, metadata)
+            dash = "none" if index == 0 else f"{index + 1} {index + 2}"
+            allocated[sample_id] = SeriesStyle(
+                color=base_style.color,
+                dash=dash,
+                marker=base_style.marker,
+                is_control=base_style.is_control,
+            )
+    return allocated
+
+
 def _line_marker(
     style: SeriesStyle, *, x: float, y: float, tooltip: str,
     css_class: str = "series-point", attributes: str = "",
@@ -762,6 +786,7 @@ def _direct_label_geometry(
 def _endpoint_label(
     sample_id: str, *, endpoint_x: float, endpoint_y: float,
     label_x: float, label_y: float, style: SeriesStyle,
+    attributes: str = "",
 ) -> str:
     leader = ""
     if abs(endpoint_y - label_y) >= 0.5:
@@ -772,7 +797,9 @@ def _endpoint_label(
         )
     return (
         leader
-        + f'<text class="endpoint-label" x="{label_x:.1f}" '
+        + f'<text class="endpoint-label" data-sample-id="'
+        f'{html.escape(sample_id, quote=True)}" {attributes}'
+        f'x="{label_x:.1f}" '
         f'y="{label_y:.1f}" fill="{style.color}" dominant-baseline="middle">'
         f"{html.escape(sample_id)}</text>"
     )
@@ -837,8 +864,19 @@ def render_binned_distribution(
             minimum_plot_bottom - plot_top
         )
 
+    anchor_indexes = {
+        sample_id: next(
+            (
+                index
+                for index in range(len(points) - 1, -1, -1)
+                if points[index][4] > 0
+            ),
+            len(points) - 1,
+        )
+        for sample_id, points in prepared.items()
+    }
     endpoint_requests = [
-        (sample_id, provisional_y(points[-1][1]))
+        (sample_id, provisional_y(points[anchor_indexes[sample_id]][1]))
         for sample_id, points in prepared.items()
     ]
     plot_bottom, label_positions = _direct_label_geometry(
@@ -874,8 +912,10 @@ def render_binned_distribution(
     ]
     marks = []
     legend = []
+    styles = _allocate_series_styles(list(prepared), metadata)
     for sample_id, points in sorted(prepared.items()):
-        assay_target, _, style = _series_metadata(sample_id, metadata)
+        assay_target, _, _ = _series_metadata(sample_id, metadata)
+        style = styles[sample_id]
         plotted = [
             (x_position(midpoint), y_position(percent))
             for midpoint, percent, _, _, _ in points
@@ -910,7 +950,9 @@ def render_binned_distribution(
                     attributes=point_attributes,
                 )
             )
-        endpoint_x, endpoint_y = plotted[-1]
+        anchor_index = anchor_indexes[sample_id]
+        endpoint_x, endpoint_y = plotted[anchor_index]
+        anchor_midpoint = points[anchor_index][0]
         marks.append(
             _endpoint_label(
                 sample_id,
@@ -919,6 +961,9 @@ def render_binned_distribution(
                 label_x=label_x,
                 label_y=label_positions[sample_id],
                 style=style,
+                attributes=(
+                    f'data-anchor-bin-midpoint="{_exact_number(anchor_midpoint)}" '
+                ),
             )
         )
         legend.append(_line_legend_entry(sample_id, assay_target, style))
@@ -1040,8 +1085,10 @@ def render_ecdf(
     y_ticks = [(value, format(value, ".0f")) for value in (0, 25, 50, 75, 100)]
     marks = []
     legend = []
+    styles = _allocate_series_styles(list(prepared), metadata)
     for sample_id, points in sorted(prepared.items()):
-        assay_target, _, style = _series_metadata(sample_id, metadata)
+        assay_target, _, _ = _series_metadata(sample_id, metadata)
+        style = styles[sample_id]
         plotted = [
             (x_position(value), y_position(cumulative))
             for value, cumulative, _ in points
@@ -1185,8 +1232,10 @@ def render_profile_chart(
     ]
     marks = []
     legend = []
+    styles = _allocate_series_styles(list(prepared), metadata)
     for sample_id, points in sorted(prepared.items()):
-        assay_target, _, style = _series_metadata(sample_id, metadata)
+        assay_target, _, _ = _series_metadata(sample_id, metadata)
+        style = styles[sample_id]
         plotted = [
             (x_position(position), y_position(signal))
             for position, signal in points

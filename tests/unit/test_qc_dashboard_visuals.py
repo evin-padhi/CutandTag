@@ -168,6 +168,108 @@ class DistributionRenderingTests(unittest.TestCase):
         )
         self.assertIn('class="endpoint-leader"', panel)
 
+    def test_real_cohort_replicates_have_unique_styles_within_each_target(self):
+        targets = {
+            "NX701_IgG": "IgG",
+            "NX702_IgG": "IgG",
+            "NX703_IgG": "IgG",
+            "NX701_CTCF": "CTCF",
+            "NX702_CTCF": "CTCF",
+            "NX703_CTCF": "CTCF",
+            "NX704_GATA1": "GATA1",
+            "NX705_GATA1": "GATA1",
+            "NX706_GATA1": "GATA1",
+            "NX704_RUNX1": "RUNX1",
+            "NX705_RUNX1": "RUNX1",
+            "NX706_RUNX1": "RUNX1",
+        }
+        metadata = {
+            sample_id: {
+                "assay_target": target,
+                "is_control": target == "IgG",
+            }
+            for sample_id, target in targets.items()
+        }
+        panel = visuals.render_binned_distribution(
+            "Insert-size distribution",
+            {
+                sample_id: [
+                    {"bin_start": 0, "bin_end": 250, "count": 1, "percent": 100.0}
+                ]
+                for sample_id in targets
+            },
+            metadata,
+            x_axis_label="Insert size (bp)",
+        )
+
+        for target in ("IgG", "CTCF", "GATA1", "RUNX1"):
+            sample_ids = [
+                sample_id for sample_id, sample_target in targets.items()
+                if sample_target == target
+            ]
+            styles = []
+            colors = set()
+            for sample_id in sample_ids:
+                trace = re.search(
+                    rf'class="distribution-trace"[^>]*'
+                    rf'data-sample-id="{sample_id}"[^>]*',
+                    panel,
+                )
+                self.assertIsNotNone(trace)
+                colors.add(re.search(r'stroke="([^"]+)"', trace.group()).group(1))
+                styles.append((
+                    re.search(
+                        r'stroke-dasharray="([^"]+)"', trace.group()
+                    ).group(1),
+                    re.search(r'data-marker="([^"]+)"', trace.group()).group(1),
+                ))
+            self.assertEqual(len(colors), 1)
+            self.assertEqual(len(styles), len(set(styles)))
+
+    def test_distribution_label_anchors_at_each_samples_last_nonzero_bin(self):
+        panel = visuals.render_binned_distribution(
+            "Insert-size distribution",
+            {
+                "S1": [
+                    {"bin_start": 0, "bin_end": 250, "count": 4, "percent": 100.0},
+                    {"bin_start": 250, "bin_end": 500, "count": 0, "percent": 0.0},
+                    {"bin_start": 500, "bin_end": 750, "count": 0, "percent": 0.0},
+                ],
+                "S2": [
+                    {"bin_start": 0, "bin_end": 250, "count": 0, "percent": 0.0},
+                    {"bin_start": 250, "bin_end": 500, "count": 1, "percent": 25.0},
+                    {"bin_start": 500, "bin_end": 750, "count": 3, "percent": 75.0},
+                ],
+                "EMPTY": [
+                    {"bin_start": 0, "bin_end": 250, "count": 0, "percent": 0.0},
+                    {"bin_start": 250, "bin_end": 500, "count": 0, "percent": 0.0},
+                    {"bin_start": 500, "bin_end": 750, "count": 0, "percent": 0.0},
+                ],
+            },
+            {
+                **self.metadata(),
+                "EMPTY": {"assay_target": "CTCF", "is_control": False},
+            },
+            x_axis_label="Insert size (bp)",
+        )
+
+        self.assertRegex(
+            panel,
+            r'class="endpoint-label"[^>]*data-sample-id="S1"[^>]*'
+            r'data-anchor-bin-midpoint="125"',
+        )
+        self.assertRegex(
+            panel,
+            r'class="endpoint-label"[^>]*data-sample-id="S2"[^>]*'
+            r'data-anchor-bin-midpoint="625"',
+        )
+        self.assertRegex(
+            panel,
+            r'class="endpoint-label"[^>]*data-sample-id="EMPTY"[^>]*'
+            r'data-anchor-bin-midpoint="625"',
+        )
+        self.assertIn('data-bin-midpoint="625"', panel)
+
     def test_fragments_per_peak_ecdf_has_separate_zero_and_log_ticks(self):
         panel = visuals.render_ecdf(
             "Fragments per peak",
