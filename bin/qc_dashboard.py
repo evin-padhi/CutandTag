@@ -734,15 +734,49 @@ def build_motif_heatmap(
         key=lambda sample: str(sample.get("sample_id", "")),
     )
     sample_ids = [str(sample.get("sample_id", "")) for sample in targets]
+    expected_motifs = sorted(
+        {
+            str(sample.get("expected_motif")).strip()
+            for sample in targets
+            if motif_tokens(sample.get("expected_motif"))
+        },
+        key=lambda value: (value.casefold(), value),
+    )
     records_by_sample: dict[
         str, dict[tuple[str, str], Mapping[str, object]]
     ] = {}
     key_records: dict[tuple[str, str], list[Mapping[str, object]]] = {}
+    display_candidates: dict[tuple[str, str], set[tuple[str, str]]] = {}
     cognate_groups: dict[tuple[str, str], str] = {}
+
+    def display_key(record: Mapping[str, object]) -> tuple[str, str]:
+        return (
+            str(record.get("motif_id") or "").strip(),
+            str(record.get("motif_alt_id") or "").strip(),
+        )
+
+    def normalized_key(key: tuple[str, str]) -> tuple[str, str]:
+        return key[0].casefold(), key[1].casefold()
+
+    def record_priority(record: Mapping[str, object]) -> tuple[object, ...]:
+        adjusted = record.get("adjusted_p_value")
+        adjusted_sort = (
+            float(adjusted)
+            if isinstance(adjusted, (int, float))
+            and math.isfinite(float(adjusted))
+            else math.inf
+        )
+        rank = record.get("rank")
+        rank_sort = (
+            float(rank)
+            if isinstance(rank, (int, float)) and math.isfinite(float(rank))
+            else math.inf
+        )
+        key = display_key(record)
+        return adjusted_sort, rank_sort, key[1], key[0]
 
     for sample in targets:
         sample_id = str(sample.get("sample_id", ""))
-        expected = sample.get("expected_motif")
         sample_records: dict[tuple[str, str], Mapping[str, object]] = {}
         raw_records = sample.get("ame_motifs", [])
         if not isinstance(raw_records, Sequence) or isinstance(
@@ -752,26 +786,46 @@ def build_motif_heatmap(
         for record in raw_records:
             if not isinstance(record, Mapping):
                 continue
-            key = (
-                str(record.get("motif_id") or ""),
-                str(record.get("motif_alt_id") or ""),
-            )
-            sample_records[key] = record
+            display = display_key(record)
+            key = normalized_key(display)
+            current_record = sample_records.get(key)
+            if (
+                current_record is None
+                or record_priority(record) < record_priority(current_record)
+            ):
+                sample_records[key] = record
             key_records.setdefault(key, []).append(record)
-            if is_cognate_motif(expected, *key):
-                group = str(expected or "").casefold()
-                current = cognate_groups.get(key)
-                if current is None or group < current:
-                    cognate_groups[key] = group
+            display_candidates.setdefault(key, set()).add(display)
         records_by_sample[sample_id] = sample_records
 
-    forced_cognate_keys = sorted(
+    display_by_key = {
+        key: min(
+            candidates,
+            key=lambda display: (
+                display[1].casefold(),
+                display[0].casefold(),
+                display[1],
+                display[0],
+            ),
+        )
+        for key, candidates in display_candidates.items()
+    }
+    for key, display in display_by_key.items():
+        matching_groups = [
+            expected.casefold()
+            for expected in expected_motifs
+            if is_cognate_motif(expected, *display)
+        ]
+        if matching_groups:
+            cognate_groups[key] = min(matching_groups)
+
+    forced_normalized_keys = sorted(
         cognate_groups,
         key=lambda key: (
             cognate_groups[key],
-            key[1].casefold(),
-            key[0].casefold(),
-            key,
+            display_by_key[key][1].casefold(),
+            display_by_key[key][0].casefold(),
+            display_by_key[key],
         ),
     )
 
@@ -783,21 +837,31 @@ def build_motif_heatmap(
                 values.append(float(value))
         return min(values) if values else math.inf
 
-    noncognate_keys = sorted(
+    noncognate_normalized_keys = sorted(
         (key for key in key_records if key not in cognate_groups),
         key=lambda key: (
             best_adjusted(key),
-            key[1].casefold(),
-            key[0].casefold(),
-            key,
+            display_by_key[key][1].casefold(),
+            display_by_key[key][0].casefold(),
+            display_by_key[key],
         ),
     )[:noncognate_limit]
-    motif_keys = [*forced_cognate_keys, *noncognate_keys]
+    normalized_keys = [
+        *forced_normalized_keys, *noncognate_normalized_keys,
+    ]
+    forced_cognate_keys = [
+        display_by_key[key] for key in forced_normalized_keys
+    ]
+    noncognate_keys = [
+        display_by_key[key] for key in noncognate_normalized_keys
+    ]
+    motif_keys = [display_by_key[key] for key in normalized_keys]
     cells: dict[tuple[str, tuple[str, str]], dict[str, object]] = {}
     for sample in targets:
         sample_id = str(sample.get("sample_id", ""))
         expected = sample.get("expected_motif")
-        for key in motif_keys:
+        for key in normalized_keys:
+            display = display_by_key[key]
             record = records_by_sample[sample_id].get(key)
             adjusted = (
                 record.get("adjusted_p_value")
@@ -817,11 +881,11 @@ def build_motif_heatmap(
             else:
                 score = 0.0
                 label = "ns"
-            cells[(sample_id, key)] = {
+            cells[(sample_id, display)] = {
                 "score": score,
                 "label": label,
                 "adjusted_p_value": adjusted,
-                "outlined": is_cognate_motif(expected, *key),
+                "outlined": is_cognate_motif(expected, *display),
             }
 
     return {

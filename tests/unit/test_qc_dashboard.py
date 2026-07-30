@@ -894,6 +894,64 @@ class TssAndAmeTests(unittest.TestCase):
             ]["outlined"]
         )
 
+    def test_build_motif_heatmap_forces_cognate_seen_in_another_sample(self):
+        """Every cohort TF forces matching motifs even when its own AME row is absent."""
+        samples = [
+            {
+                "sample_id": "GATA_sample", "expected_motif": "GATA1",
+                "is_control": False, "ame_motifs": [],
+            },
+            {
+                "sample_id": "CTCF_sample", "expected_motif": "CTCF",
+                "is_control": False,
+                "ame_motifs": [{
+                    "motif_id": "MA_GATA", "motif_alt_id": "GATA1::TAL1",
+                    "adjusted_p_value": 0.001,
+                }],
+            },
+        ]
+
+        matrix = qc.build_motif_heatmap(samples, noncognate_limit=0)
+        motif_key = ("MA_GATA", "GATA1::TAL1")
+
+        self.assertEqual(matrix["forced_cognate_keys"], [motif_key])
+        self.assertEqual(matrix["motif_keys"], [motif_key])
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", motif_key)]["label"], "ns"
+        )
+        self.assertTrue(
+            matrix["cells"][("GATA_sample", motif_key)]["outlined"]
+        )
+        self.assertFalse(
+            matrix["cells"][("CTCF_sample", motif_key)]["outlined"]
+        )
+
+    def test_build_motif_heatmap_collapses_case_variants_with_stable_display(self):
+        """Case variants share one identity while the best value supplies the cell."""
+        samples = [{
+            "sample_id": "GATA_sample", "expected_motif": "GATA1",
+            "is_control": False,
+            "ame_motifs": [
+                {
+                    "motif_id": "ma_gata", "motif_alt_id": "gata1::tal1",
+                    "adjusted_p_value": 0.001,
+                },
+                {
+                    "motif_id": "MA_GATA", "motif_alt_id": "GATA1::TAL1",
+                    "adjusted_p_value": 0.01,
+                },
+            ],
+        }]
+
+        matrix = qc.build_motif_heatmap(samples, noncognate_limit=0)
+        motif_key = ("MA_GATA", "GATA1::TAL1")
+
+        self.assertEqual(matrix["motif_keys"], [motif_key])
+        self.assertEqual(matrix["forced_cognate_keys"], [motif_key])
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", motif_key)]["score"], 3.0
+        )
+
 
 class ReportDataTests(unittest.TestCase):
     def test_build_report_data_joins_target_and_preserves_control_optional_gaps(self):
