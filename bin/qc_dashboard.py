@@ -555,9 +555,14 @@ def read_tss_profile(
             f"{path}: second TSS profile row must start with 'bins' and a blank field"
         )
     try:
-        parsed_bins = [int(value) for value in bins[2:]]
+        numeric_bins = [float(value) for value in bins[2:]]
     except ValueError as error:
         raise DashboardInputError(f"{path}: TSS profile bins must be integers") from error
+    if any(
+        not math.isfinite(value) or not value.is_integer() for value in numeric_bins
+    ):
+        raise DashboardInputError(f"{path}: TSS profile bins must be integers")
+    parsed_bins = [int(value) for value in numeric_bins]
     if parsed_bins != list(range(1, expected_bins + 1)):
         raise DashboardInputError(
             f"{path}: TSS profile bins must be exactly 1 through {expected_bins}"
