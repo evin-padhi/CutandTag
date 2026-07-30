@@ -689,14 +689,20 @@ grep -F $'chrMini\t49\t50\ttss_2\t0\t-' \
 
 dashboard_fixture="$tmp_dir/dashboard_preprocess"
 mkdir -p \
-  "$dashboard_fixture/dashboard_inputs/ame/results01/ame" \
-  "$dashboard_fixture/dashboard_inputs/ame/results02/ame" \
+  "$dashboard_fixture/ame_sources/ame01" \
+  "$dashboard_fixture/ame_sources/ame02" \
+  "$dashboard_fixture/dashboard_inputs/ame/results01" \
+  "$dashboard_fixture/dashboard_inputs/ame/results02" \
   "$dashboard_fixture/dashboard_inputs/ame_status/statuses01" \
   "$dashboard_fixture/dashboard_inputs/ame_status/statuses02" \
   "$dashboard_fixture/dashboard_inputs/motif/metrics01" \
   "$dashboard_fixture/dashboard_inputs/motif/metrics02" \
   "$dashboard_fixture/dashboard_inputs/normalized_ame" \
   "$dashboard_fixture/dashboard_inputs/normalized_motif"
+ln -s "$dashboard_fixture/ame_sources/ame01" \
+  "$dashboard_fixture/dashboard_inputs/ame/results01/ame"
+ln -s "$dashboard_fixture/ame_sources/ame02" \
+  "$dashboard_fixture/dashboard_inputs/ame/results02/ame"
 cat > "$dashboard_fixture/sample_metadata.json" <<'EOF'
 [
   {"sample_id": "TARGET_A", "is_control": false},
