@@ -43,6 +43,10 @@ def _required_text(record: Mapping[str, object], field: str, *, label: str) -> s
     return value.strip()
 
 
+def _is_blank(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
 def _read_json(path: Path, *, label: str) -> object:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -74,6 +78,29 @@ def load_metadata(path: Path) -> dict[str, dict[str, object]]:
         if not isinstance(record["is_control"], bool):
             raise DashboardInputError("metadata is_control must be boolean")
         records[sample_id] = record
+    for sample_id, record in records.items():
+        if record["is_control"]:
+            if record["assay_target"] != "IgG":
+                raise DashboardInputError(f"control {sample_id} assay_target must be IgG")
+            if not _is_blank(record["control_id"]):
+                raise DashboardInputError(f"control {sample_id} control_id must be blank")
+            if not _is_blank(record["expected_motif"]):
+                raise DashboardInputError(f"control {sample_id} expected_motif must be blank")
+            continue
+        control_id = record["control_id"]
+        expected_motif = record["expected_motif"]
+        if not isinstance(control_id, str) or not control_id.strip():
+            raise DashboardInputError(f"target {sample_id} control_id is required")
+        if not isinstance(expected_motif, str) or not expected_motif.strip():
+            raise DashboardInputError(f"target {sample_id} expected_motif is required")
+        control_id = control_id.strip()
+        control = records.get(control_id)
+        if control is None or not control["is_control"]:
+            raise DashboardInputError(f"target {sample_id} control_id {control_id} must reference a control")
+        if record["input_group"] != control["input_group"]:
+            raise DashboardInputError(
+                f"target {sample_id} control_id {control_id} must share input_group"
+            )
     return dict(sorted(records.items()))
 
 
@@ -82,30 +109,66 @@ def _count(value: object, *, label: str) -> int | float:
     return int(parsed) if parsed.is_integer() else parsed
 
 
-def read_demultiplex_metrics(paths: Sequence[Path]) -> dict[str, dict[str, object]]:
+def read_demultiplex_metrics(
+    paths: Sequence[Path], metadata: Mapping[str, Mapping[str, object]]
+) -> dict[str, dict[str, object]]:
     """Read physical-library count summaries and derive their fractions."""
     parsed: dict[str, dict[str, object]] = {}
     for path in paths:
         raw = _read_json(path, label="demultiplex metrics")
         if not isinstance(raw, dict):
             raise DashboardInputError(f"{path}: demultiplex metrics must be an object")
-        library_id = _required_text(raw, "library_id", label="demultiplex metrics")
-        if library_id in parsed:
-            raise DashboardInputError(f"duplicate library_id {library_id}")
         counts = {
-            name: _count(raw.get(name), label=f"{library_id} {name}")
+            name: _count(raw.get(name), label=f"demultiplex {name}")
             for name in ("total_reads", "assigned_reads", "ambiguous_reads", "unassigned_reads")
         }
         raw_assignments = raw.get("assignment_counts")
         if not isinstance(raw_assignments, dict):
-            raise DashboardInputError(f"{library_id} assignment_counts must be an object")
+            raise DashboardInputError(f"{path}: assignment_counts must be an object")
         assignment_counts: dict[str, int | float] = {}
         for sample_id, count in raw_assignments.items():
             if not isinstance(sample_id, str) or not sample_id.strip():
-                raise DashboardInputError(f"{library_id} assignment_counts sample_id is required")
+                raise DashboardInputError(f"{path}: assignment_counts sample_id is required")
+            if sample_id not in metadata:
+                raise DashboardInputError(
+                    f"assignment_counts reference unknown sample_id {sample_id}"
+                )
             assignment_counts[sample_id] = _count(
-                count, label=f"{library_id} assignment count for {sample_id}"
+                count, label=f"assignment count for {sample_id}"
             )
+        if sum(assignment_counts.values()) != counts["assigned_reads"]:
+            raise DashboardInputError("assignment_counts must sum to assigned_reads")
+        if sum(counts[name] for name in ("assigned_reads", "ambiguous_reads", "unassigned_reads")) != counts["total_reads"]:
+            raise DashboardInputError(
+                "assigned_reads, ambiguous_reads, and unassigned_reads must sum to total_reads"
+            )
+        inferred_library_ids = {
+            _required_text(metadata[sample_id], "library_id", label=f"metadata {sample_id}")
+            for sample_id in assignment_counts
+        }
+        explicit_library_id = raw.get("library_id")
+        if explicit_library_id is not None:
+            if not isinstance(explicit_library_id, str) or not explicit_library_id.strip():
+                raise DashboardInputError("demultiplex metrics library_id is required when supplied")
+            library_id = explicit_library_id.strip()
+            if library_id not in {
+                _required_text(record, "library_id", label=f"metadata {sample_id}")
+                for sample_id, record in metadata.items()
+            }:
+                raise DashboardInputError(f"demultiplex metrics reference unknown library_id {library_id}")
+            if inferred_library_ids and inferred_library_ids != {library_id}:
+                raise DashboardInputError(
+                    f"assignment_counts do not match library_id {library_id}"
+                )
+        else:
+            if len(inferred_library_ids) != 1:
+                raise DashboardInputError(
+                    "assignment_counts map to multiple library_id values"
+                    if inferred_library_ids else "assignment_counts cannot determine library_id"
+                )
+            library_id = next(iter(inferred_library_ids))
+        if library_id in parsed:
+            raise DashboardInputError(f"duplicate library_id {library_id}")
         total = counts["total_reads"]
         denominator = total or 1
         parsed[library_id] = {

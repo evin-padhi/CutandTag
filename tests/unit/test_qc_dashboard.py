@@ -40,6 +40,81 @@ class MetadataAndTableParserTests(unittest.TestCase):
         with self.assertRaisesRegex(qc.DashboardInputError, "sample_id is required"):
             qc.load_metadata(path)
 
+    def test_load_metadata_rejects_contradictory_control_and_target_links(self):
+        """Control/target roles must form a same-input, unambiguous biological link."""
+        workspace = self.make_workspace()
+        cases = (
+            (
+                "control-not-igg",
+                [{"sample_id": "S_IgG", "library_id": "L1", "input_group": "25K",
+                  "assay_target": "CTCF", "is_control": True, "control_id": "", "expected_motif": ""}],
+                "control S_IgG assay_target must be IgG",
+            ),
+            (
+                "control-has-target-fields",
+                [{"sample_id": "S_IgG", "library_id": "L1", "input_group": "25K",
+                  "assay_target": "IgG", "is_control": True, "control_id": "S_IgG", "expected_motif": "CTCF"}],
+                "control S_IgG control_id must be blank",
+            ),
+            (
+                "control-has-expected-motif",
+                [{"sample_id": "S_IgG", "library_id": "L1", "input_group": "25K",
+                  "assay_target": "IgG", "is_control": True, "control_id": "", "expected_motif": "CTCF"}],
+                "control S_IgG expected_motif must be blank",
+            ),
+            (
+                "target-missing-control",
+                [{"sample_id": "S1", "library_id": "L1", "input_group": "25K",
+                  "assay_target": "CTCF", "is_control": False, "control_id": "", "expected_motif": "CTCF"}],
+                "target S1 control_id is required",
+            ),
+            (
+                "target-missing-expected-motif",
+                [
+                    {"sample_id": "S_IgG", "library_id": "L1", "input_group": "25K",
+                     "assay_target": "IgG", "is_control": True, "control_id": "", "expected_motif": ""},
+                    {"sample_id": "S1", "library_id": "L1", "input_group": "25K",
+                     "assay_target": "CTCF", "is_control": False, "control_id": "S_IgG", "expected_motif": ""},
+                ],
+                "target S1 expected_motif is required",
+            ),
+            (
+                "target-cross-input-control",
+                [
+                    {"sample_id": "S_IgG", "library_id": "L1", "input_group": "50K",
+                     "assay_target": "IgG", "is_control": True, "control_id": "", "expected_motif": ""},
+                    {"sample_id": "S1", "library_id": "L2", "input_group": "25K",
+                     "assay_target": "CTCF", "is_control": False, "control_id": "S_IgG", "expected_motif": "CTCF"},
+                ],
+                "target S1 control_id S_IgG must share input_group",
+            ),
+        )
+        for name, metadata, expression in cases:
+            with self.subTest(name=name):
+                path = workspace / f"{name}.json"
+                path.write_text(json.dumps(metadata), encoding="utf-8")
+                with self.assertRaisesRegex(qc.DashboardInputError, expression):
+                    qc.load_metadata(path)
+
+    def metadata(self):
+        return {
+            "S1": {
+                "sample_id": "S1", "library_id": "L1", "input_group": "25K",
+                "assay_target": "CTCF", "is_control": False, "control_id": "S_IgG",
+                "expected_motif": "CTCF",
+            },
+            "S2": {
+                "sample_id": "S2", "library_id": "L1", "input_group": "25K",
+                "assay_target": "GATA1", "is_control": False, "control_id": "S_IgG",
+                "expected_motif": "GATA1",
+            },
+            "S_IgG": {
+                "sample_id": "S_IgG", "library_id": "L1", "input_group": "25K",
+                "assay_target": "IgG", "is_control": True, "control_id": None,
+                "expected_motif": None,
+            },
+        }
+
     def test_read_demultiplex_metrics_preserves_library_and_sample_counts(self):
         """Cached fractions cannot override the physical-library count totals."""
         workspace = self.make_workspace()
@@ -54,7 +129,7 @@ class MetadataAndTableParserTests(unittest.TestCase):
             "assignment_counts": {"S1": 30, "S2": 50},
         }), encoding="utf-8")
 
-        rows = qc.read_demultiplex_metrics([path])
+        rows = qc.read_demultiplex_metrics([path], self.metadata())
 
         self.assertEqual(rows["L1"]["assigned_fraction"], 0.8)
         self.assertEqual(rows["L1"]["assignment_counts"]["S1"], 30)
@@ -72,7 +147,7 @@ class MetadataAndTableParserTests(unittest.TestCase):
             paths.append(path)
 
         with self.assertRaisesRegex(qc.DashboardInputError, "duplicate library_id L1"):
-            qc.read_demultiplex_metrics(paths)
+            qc.read_demultiplex_metrics(paths, self.metadata())
 
     def test_read_demultiplex_metrics_rejects_negative_or_nonfinite_counts(self):
         """Counts must remain finite non-negative quantities in fractions and joins."""
@@ -88,7 +163,71 @@ class MetadataAndTableParserTests(unittest.TestCase):
                     "ambiguous_reads": 0, "unassigned_reads": 0, "assignment_counts": {},
                 }), encoding="utf-8")
                 with self.assertRaisesRegex(qc.DashboardInputError, expression):
-                    qc.read_demultiplex_metrics([path])
+                    qc.read_demultiplex_metrics([path], self.metadata())
+
+    def test_read_demultiplex_metrics_recovers_library_id_from_real_producer_schema(self):
+        """The producer JSON has only count fields and per-sample assignments."""
+        workspace = self.make_workspace()
+        path = workspace / "demultiplex.metrics.json"
+        path.write_text(json.dumps({
+            "total_reads": 100,
+            "assigned_reads": 80,
+            "ambiguous_reads": 5,
+            "unassigned_reads": 15,
+            "assignment_counts": {"S1": 30, "S2": 50},
+            "observed_i2_counts": {"TATAGCCT": 30, "ATAGAGGC": 50},
+        }), encoding="utf-8")
+
+        rows = qc.read_demultiplex_metrics([path], self.metadata())
+
+        self.assertEqual(rows["L1"]["assignment_counts"], {"S1": 30, "S2": 50})
+        self.assertEqual(rows["L1"]["assigned_fraction"], 0.8)
+
+    def test_read_demultiplex_metrics_rejects_ambiguous_unknown_or_inconsistent_counts(self):
+        """Assignment identities and count totals must be safe before joining samples."""
+        workspace = self.make_workspace()
+        metadata = self.metadata()
+        metadata["S2"] = {**metadata["S2"], "library_id": "L2"}
+        cases = (
+            (
+                "ambiguous-library",
+                metadata,
+                {"S1": 30, "S2": 50},
+                80, 5, 15,
+                "assignment_counts map to multiple library_id values",
+            ),
+            (
+                "unknown-sample",
+                self.metadata(),
+                {"S1": 30, "UNKNOWN": 50},
+                80, 5, 15,
+                "assignment_counts reference unknown sample_id UNKNOWN",
+            ),
+            (
+                "bad-assigned-sum",
+                self.metadata(),
+                {"S1": 30, "S2": 40},
+                80, 5, 15,
+                "assignment_counts must sum to assigned_reads",
+            ),
+            (
+                "bad-total-sum",
+                self.metadata(),
+                {"S1": 30, "S2": 50},
+                80, 5, 14,
+                "assigned_reads, ambiguous_reads, and unassigned_reads must sum to total_reads",
+            ),
+        )
+        for name, case_metadata, assignments, assigned, ambiguous, unassigned, expression in cases:
+            with self.subTest(name=name):
+                path = workspace / f"{name}.json"
+                path.write_text(json.dumps({
+                    "total_reads": 100, "assigned_reads": assigned,
+                    "ambiguous_reads": ambiguous, "unassigned_reads": unassigned,
+                    "assignment_counts": assignments,
+                }), encoding="utf-8")
+                with self.assertRaisesRegex(qc.DashboardInputError, expression):
+                    qc.read_demultiplex_metrics([path], case_metadata)
 
     def test_read_library_metrics_rejects_duplicate_sample_ids(self):
         """A sample may have only one library-QC summary row."""
@@ -176,6 +315,21 @@ class TssAndAmeTests(unittest.TestCase):
         multiple.write_text(row + row, encoding="utf-8")
         with self.assertRaisesRegex(qc.DashboardInputError, "multiple compatible"):
             qc.read_tss_profile(multiple)
+
+    def test_read_tss_profile_rejects_raw_multiregion_matrix(self):
+        """Only Task 3's aggregate plotProfile table is a supported dashboard input."""
+        workspace = self.make_workspace()
+        path = workspace / "S1.tss_matrix.tsv"
+        values = "\t".join(["1"] * 600)
+        path.write_text(
+            "# raw computeMatrix rows are per-region rather than aggregate\n"
+            f"chr1\t0\t1\tregion_1\t0\t+\t{values}\n"
+            f"chr1\t2\t3\tregion_2\t0\t+\t{values}\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(qc.DashboardInputError, "multiple compatible"):
+            qc.read_tss_profile(path)
 
     def test_read_top_ame_ignores_no_peaks_and_orders_top_ten(self):
         """AME rankings must be deterministic and omit the pipeline's no-peaks sentinel."""
