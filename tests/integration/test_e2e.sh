@@ -438,6 +438,7 @@ ctcf = next(row for row in summary_rows if row["sample_id"] == "MINI_CTCF")
 igg = next(row for row in summary_rows if row["sample_id"] == "MINI_IgG")
 assert float(ctcf["frip"]) > 0
 assert float(ctcf["tss_enrichment"]) == 6.0
+assert ctcf["is_control"] == "false"
 assert igg["is_control"] == "true"
 assert igg["frip"] == ""
 assert igg["expected_motif_status"] == "not_applicable_control"

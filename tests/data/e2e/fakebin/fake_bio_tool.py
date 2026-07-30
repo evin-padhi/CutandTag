@@ -238,9 +238,17 @@ def fake_plot_profile(args: list[str]) -> None:
     values[:10] = ["2"] * 10
     values[-10:] = ["2"] * 10
     values[300] = "12"
+    labels = [""] * 600
+    labels[0] = "-3.0Kb"
+    labels[299] = "TSS"
+    labels[599] = "3.0Kb"
+    bins = [str(index) for index in range(1, 601)]
     profile_path.write_text("fake PNG placeholder\n", encoding="utf-8")
     profile_table_path.write_text(
-        "average\t" + "\t".join(values) + "\n", encoding="utf-8"
+        "bin labels\t\t" + "\t".join(labels) + "\n"
+        "bins\t\t" + "\t".join(bins) + "\n"
+        "coverage.RPKM\tgenes\t" + "\t".join(values) + "\n",
+        encoding="utf-8",
     )
 
 

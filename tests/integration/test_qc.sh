@@ -24,6 +24,7 @@ done
 python3 - <<'PY'
 from pathlib import Path
 import codecs
+import json
 import re
 
 root = Path.cwd()
@@ -224,6 +225,14 @@ checks = {
         and "ame_status_sample_ids," in qc
         and "AME result sample_ids do not match target metadata" in qc_dashboard
         and "AME status sample_ids do not match target metadata" in qc_dashboard,
+    "AME stage ordinals are validated and numerically ordered":
+        "def staged_tables(" in qc_dashboard
+        and "ordinals must be contiguous from 1" in qc_dashboard
+        and '"AME result"' in qc_dashboard
+        and '"AME status"' in qc_dashboard,
+    "dashboard receives explicit motif-analysis intent and generator version":
+        '--motif-analysis-status "${motifAnalysisStatus}"' in qc_dashboard
+        and "qc_dashboard.py: 1.0.0" in qc_dashboard,
     "QC rejects control AME artifacts before dashboard staging":
         "IgG control ${safeMeta.sample_id} cannot have an AME result" in qc
         and "IgG control ${safeMeta.sample_id} cannot have an AME status" in qc,
@@ -334,8 +343,8 @@ dashboard_preprocessor = re.search(
 )
 if not dashboard_preprocessor:
     raise SystemExit("FAIL: could not extract QC dashboard preprocessor")
-dashboard_source = dashboard_preprocessor.group(1)
-dashboard_source = dashboard_source.replace(
+dashboard_template = dashboard_preprocessor.group(1)
+dashboard_source = dashboard_template.replace(
     "${resultSampleIdsJson}", '["TARGET_A", "TARGET_B"]'
 ).replace(
     "${statusSampleIdsJson}", '["TARGET_A", "TARGET_B"]'
@@ -343,6 +352,17 @@ dashboard_source = dashboard_source.replace(
 dashboard_source = codecs.decode(dashboard_source, "unicode_escape")
 (Path.cwd() / ".qc_dashboard_preprocess.test.py").write_text(
     dashboard_source + "\n"
+)
+large_sample_ids = [f"TARGET_{index:03d}" for index in range(1, 102)]
+large_ids_json = json.dumps(large_sample_ids, separators=(",", ":"))
+large_dashboard_source = dashboard_template.replace(
+    "${resultSampleIdsJson}", large_ids_json
+).replace(
+    "${statusSampleIdsJson}", large_ids_json
+)
+large_dashboard_source = codecs.decode(large_dashboard_source, "unicode_escape")
+(Path.cwd() / ".qc_dashboard_preprocess_large.test.py").write_text(
+    large_dashboard_source + "\n"
 )
 gtf_prepare = re.search(
     r"def prepareTss = annotation_mode == 'gtf' \? '''\n(.*?)\n    ''' : '''",
@@ -359,7 +379,7 @@ if not gtf_prepare:
 PY
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/nanocut-qc.XXXXXX")
-trap 'rm -rf -- "${tmp_dir:?}" .fragment_pairs.test.awk .filtered_flags.test.awk .multiqc_aggregate.test.py .library_qc_formatter.test.py .motif_qc_formatter.test.py .qc_dashboard_preprocess.test.py .tss_gtf.test.sh' EXIT
+trap 'rm -rf -- "${tmp_dir:?}" .fragment_pairs.test.awk .filtered_flags.test.awk .multiqc_aggregate.test.py .library_qc_formatter.test.py .motif_qc_formatter.test.py .qc_dashboard_preprocess.test.py .qc_dashboard_preprocess_large.test.py .tss_gtf.test.sh' EXIT
 mkdir -p "$tmp_dir/direct"
 
 cat > "$tmp_dir/direct/name_sorted.sam" <<'EOF'
@@ -734,6 +754,110 @@ if (
 fi
 grep -F 'AME status must be exactly status followed by computed or no_peaks' \
   "$tmp_dir/bad-ame-status.log" >/dev/null
+
+large_dashboard_fixture="$tmp_dir/dashboard_preprocess_large"
+python3 - "$large_dashboard_fixture" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sample_ids = [f"TARGET_{index:03d}" for index in range(1, 102)]
+(root / "sample_metadata.json").parent.mkdir(parents=True, exist_ok=True)
+for directory in (
+    root / "dashboard_inputs" / "normalized_ame",
+    root / "dashboard_inputs" / "normalized_motif",
+):
+    directory.mkdir(parents=True, exist_ok=True)
+(root / "sample_metadata.json").write_text(
+    json.dumps([
+        {"sample_id": sample_id, "is_control": False}
+        for sample_id in sample_ids
+    ]),
+    encoding="utf-8",
+)
+for ordinal, sample_id in enumerate(sample_ids, start=1):
+    stage = f"{ordinal:02d}"
+    result = root / "dashboard_inputs" / "ame" / f"results{stage}" / "ame"
+    status = root / "dashboard_inputs" / "ame_status" / f"statuses{stage}"
+    motif = root / "dashboard_inputs" / "motif" / f"metrics{stage}"
+    result.mkdir(parents=True)
+    status.mkdir(parents=True)
+    motif.mkdir(parents=True)
+    (result / "ame.tsv").write_text(
+        "rank\tmotif_ID\tmotif_Alt_ID\tp-value\tE-value\tpos\tneg\n"
+        f"1\tMOTIF_{ordinal:03d}\tALT_{ordinal:03d}\t0.001\t0.01\t1\t1\n",
+        encoding="utf-8",
+    )
+    expected_status = "computed" if ordinal % 2 else "no_peaks"
+    (status / "ame_status.tsv").write_text(
+        f"status\t{expected_status}\n",
+        encoding="utf-8",
+    )
+    with (motif / f"{sample_id}.motif_qc.tsv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["sample_id", "expected_motif_status"],
+            delimiter="\t",
+        )
+        writer.writeheader()
+        writer.writerow({
+            "sample_id": sample_id,
+            "expected_motif_status": "pass",
+        })
+PY
+(
+  cd "$large_dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess_large.test.py"
+)
+python3 - "$large_dashboard_fixture" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for ordinal in range(1, 102):
+    sample_id = f"TARGET_{ordinal:03d}"
+    ame = (
+        root / "dashboard_inputs" / "normalized_ame"
+        / sample_id / "ame" / "ame.tsv"
+    )
+    with ame.open(encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle, delimiter="\t"))
+    assert row["motif_ID"] == f"MOTIF_{ordinal:03d}", (
+        sample_id, row["motif_ID"]
+    )
+    motif = (
+        root / "dashboard_inputs" / "normalized_motif"
+        / f"{sample_id}.motif_qc.tsv"
+    )
+    with motif.open(encoding="utf-8", newline="") as handle:
+        motif_row = next(csv.DictReader(handle, delimiter="\t"))
+    expected_status = "computed" if ordinal % 2 else "no_peaks"
+    assert motif_row["ame_status"] == expected_status, (
+        sample_id, motif_row["ame_status"]
+    )
+PY
+rm -rf \
+  "$large_dashboard_fixture/dashboard_inputs/ame/results50" \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_ame" \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_motif"
+mkdir -p \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_ame" \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_motif"
+if (
+  cd "$large_dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess_large.test.py" \
+    > "$tmp_dir/missing-ame-ordinal.log" 2>&1
+); then
+  printf 'FAIL: missing AME staged ordinal unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'staged AME result ordinals must be contiguous from 1' \
+  "$tmp_dir/missing-ame-ordinal.log" >/dev/null
 
 if ! command -v nextflow >/dev/null 2>&1; then
   printf '%s\n' \

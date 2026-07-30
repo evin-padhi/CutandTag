@@ -72,6 +72,9 @@ process QC_DASHBOARD {
     }
     def resultSampleIdsJson = groovy.json.JsonOutput.toJson(resultSampleIds)
     def statusSampleIdsJson = groovy.json.JsonOutput.toJson(statusSampleIds)
+    def motifAnalysisStatus = resultSampleIds
+        ? 'computed'
+        : 'skipped_no_database'
 
     """
     set -euo pipefail
@@ -94,6 +97,7 @@ process QC_DASHBOARD {
     python <<'PY'
 import csv
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -117,17 +121,41 @@ if result_sample_ids and sorted(result_sample_ids) != target_ids:
 if status_sample_ids and sorted(status_sample_ids) != target_ids:
     raise SystemExit("AME status sample_ids do not match target metadata")
 
-ame_root = Path("dashboard_inputs/ame")
-ame_tables = []
-for staged in sorted(ame_root.glob("results*/*")):
-    candidate = staged / "ame.tsv" if staged.is_dir() else staged
-    if candidate.name == "ame.tsv" and candidate.is_file():
-        ame_tables.append(candidate)
+def staged_tables(root, prefix, filename, label):
+    """Return exactly one table per unique, contiguous numeric stage ordinal."""
+    by_ordinal = {}
+    pattern = re.compile(rf"{re.escape(prefix)}([0-9]+)")
+    for staged in root.iterdir():
+        match = pattern.fullmatch(staged.name)
+        if match is None or not staged.is_dir():
+            raise SystemExit(f"unexpected staged {label} path: {staged}")
+        ordinal = int(match.group(1))
+        if ordinal in by_ordinal:
+            raise SystemExit(f"duplicate staged {label} ordinal {ordinal}")
+        candidates = sorted(
+            path for path in staged.rglob(filename) if path.is_file()
+        )
+        if len(candidates) != 1:
+            raise SystemExit(
+                f"{staged}: staged {label} must contain exactly one {filename}"
+            )
+        by_ordinal[ordinal] = candidates[0]
+    ordinals = sorted(by_ordinal)
+    if ordinals != list(range(1, len(ordinals) + 1)):
+        raise SystemExit(
+            f"staged {label} ordinals must be contiguous from 1"
+        )
+    return [by_ordinal[ordinal] for ordinal in ordinals]
 
-status_tables = sorted(
-    path
-    for path in Path("dashboard_inputs/ame_status").glob("statuses*/*")
-    if path.name == "ame_status.tsv" and path.is_file()
+
+ame_tables = staged_tables(
+    Path("dashboard_inputs/ame"), "results", "ame.tsv", "AME result"
+)
+status_tables = staged_tables(
+    Path("dashboard_inputs/ame_status"),
+    "statuses",
+    "ame_status.tsv",
+    "AME status",
 )
 if len(ame_tables) != len(result_sample_ids):
     raise SystemExit(
@@ -192,12 +220,13 @@ PY
         --motif-dir "dashboard_inputs/normalized_motif" \
         --ame-dir "dashboard_inputs/normalized_ame" \
         --annotation-status "${annotationStatus}" \
+        --motif-analysis-status "${motifAnalysisStatus}" \
         --outdir "."
 
     cat > "qc_dashboard_versions.yml" <<'EOF'
 QC_DASHBOARD:
   python: Python 3.12.3
-  qc_dashboard.py: repository
+  qc_dashboard.py: 1.0.0
 EOF
     """
 }

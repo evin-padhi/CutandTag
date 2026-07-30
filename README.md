@@ -292,8 +292,9 @@ results/
   is safe to copy with a results directory.
 - `reports/qc_dashboard/qc_summary.tsv` and `qc_summary.json` are reusable,
   joined per-sample data products. `top_motifs.tsv` is the reusable top-ten AME
-  motif summary and `tss_profiles.tsv` is the reusable TSS scalar/profile data
-  product. `reports/summary/combined_target_qc.tsv` remains the combined target
+  motif summary and `tss_profiles.tsv` is the reusable tidy TSS profile data
+  product. The TSS scalar is in `qc_summary.tsv` and `qc_summary.json`.
+  `reports/summary/combined_target_qc.tsv` remains the combined target
   broad-peak summary.
 - `pipeline_info/` contains the normalized manifest, validated parameter JSON,
   software versions, completion summary, built index when applicable,
@@ -302,6 +303,81 @@ results/
 Empty target peak sets are valid outputs with zero/NA QC and recorded motif
 skip status. IgG libraries receive read/alignment/library QC but are not
 peak-called against themselves and do not receive target FRiP by default.
+
+## Dashboard data-product schemas
+
+The dashboard machine-readable contract is schema version `1` and generator version `1.0.0`.
+This is the first released form of the contract. Consumers
+should check both values before interpreting fields. The HTML is a descriptive
+view of these products, not a machine interface.
+
+`qc_summary.tsv` has one row per derived sample, ordered by `sample_id`, with
+these stable columns in this exact order:
+
+```text
+sample_id, library_id, input_group, assay_target, is_control, control_id,
+expected_motif, total_read_pairs, assigned_read_pairs, ambiguous_read_pairs,
+unassigned_read_pairs, assigned_fraction, ambiguous_fraction,
+unassigned_fraction, sample_assigned_reads, sample_assignment_fraction,
+raw_total_reads, mapped_percent, properly_paired_percent, mapq_filtered_reads,
+mapq_filtered_fragments, mapq_filtered_fraction, markdup_examined_reads,
+duplicate_total, duplicate_percent, mitochondrial_percent,
+estimated_library_size, insert_size_total_pairs, insert_size_min,
+insert_size_q25, insert_size_mean, insert_size_median, insert_size_q75,
+insert_size_max, peak_count, total_covered_bases, total_fragments,
+fragments_in_peaks, frip, peak_width_min, peak_width_q25, peak_width_mean,
+peak_width_median, peak_width_q75, peak_width_max, tss_status,
+tss_enrichment, expected_motif_status, best_motif_id,
+best_adjusted_p_value, ame_status, warning_count
+```
+
+`top_motifs.tsv` contains at most ten rank-ordered AME rows per target and
+never contains IgG-control rows. Its stable columns are:
+
+```text
+sample_id, assay_target, expected_motif, rank, motif_id, motif_alt_id,
+adjusted_p_value, p_value, effect, positive_sequences
+```
+
+`tss_profiles.tsv` is the stable tidy profile export with columns
+`sample_id`, `position_bp`, `signal`. The native
+`qc/tss/<sample_id>/<sample_id>.tss_profile.tsv` is instead the pinned
+deepTools 3.5.5 `plotProfile --outFileNameData` table and should not be treated
+as the dashboard's stable consumer schema.
+
+`qc_summary.json` has exactly these top-level fields:
+`schema_version`, `generator_version`, `annotation_status`, `counts`,
+`availability`, `metric_definitions`, `samples`, and `warnings`. `counts`
+contains sample, target, control, and warning counts. `availability` summarizes
+the `demultiplex`, `library`, `insert_size`, `peak`, `peak_width`, `tss`,
+`motif`, and `ame` families. Each sample carries the same families with a
+status and reason; statuses are `computed`, `skipped`, `empty`, `missing`,
+`failed`, or `not_applicable`. Insert-size and peak-width distributions are
+arrays under the corresponding sample's `library` and `peak` objects.
+Producer-specific columns are not added automatically to this versioned
+public object.
+
+TSV missing numeric values are empty fields, booleans are lowercase `true` or
+`false`, and finite numbers use locale-independent text. JSON missing values
+are `null`; an observed but header-only distribution is an empty array with an
+`empty` availability status. The HTML displays missing values as `NA`.
+Absence, intentional skips, empty analyses, and failed/partial artifacts
+therefore remain distinguishable from measured zero.
+
+### Direct Nextflow interface changes in the unreleased dashboard update
+
+The `QC` subworkflow now requires eleven inputs, in order:
+`filtered_bams`, `final_broad_peaks`, `coverage`, `library_metrics`,
+`demultiplex_metrics`, `fastqc_reports`, `motif_metrics`, `gtf`, `tss_bed`,
+`motif_ame_results`, and `motif_ame_statuses`. Direct importers of the previous
+nine-input subworkflow must provide the two AME channels; use empty channels
+when motif analysis is disabled.
+
+The `TSS_ENRICHMENT.out.profiles` tuple now contains seven values:
+`meta`, TSS BED, compressed matrix, matrix table, profile image, native
+deepTools profile table, and status table. Direct module consumers that
+destructure the earlier six-value tuple must insert the profile-table element
+before the status table.
 
 ## QC interpretation
 

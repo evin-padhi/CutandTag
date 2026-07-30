@@ -2,15 +2,22 @@ import csv
 import contextlib
 import io
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bin"))
+GOLDEN_DEEPTOOLS_PROFILE = (
+    ROOT / "tests" / "data" / "qc" / "deeptools_3.5.5_plotprofile.tsv"
+)
 
 import qc_dashboard as qc
 
@@ -295,6 +302,67 @@ class MetadataAndTableParserTests(unittest.TestCase):
         with self.assertRaisesRegex(qc.DashboardInputError, "duplicate peak metric frip"):
             qc.read_peak_metrics([duplicate])
 
+    def test_distribution_parsers_consume_real_producer_tables_and_preserve_empty_samples(self):
+        """Dropping either staged distribution would remove approved report data."""
+        workspace = self.make_workspace()
+        insert = workspace / "S1.insert_size_distribution.tsv"
+        insert.write_text(
+            "sample_id\tinsert_size\tpair_count\n"
+            "S1\t100\t2\n"
+            "S1\t200\t1\n",
+            encoding="utf-8",
+        )
+        empty_insert = workspace / "S2.insert_size_distribution.tsv"
+        empty_insert.write_text(
+            "sample_id\tinsert_size\tpair_count\n",
+            encoding="utf-8",
+        )
+        widths = workspace / "S1.peak_qc.width_histogram.tsv"
+        widths.write_text(
+            "width\tpeak_count\n"
+            "150\t3\n"
+            "300\t1\n",
+            encoding="utf-8",
+        )
+        empty_widths = workspace / "S2.peak_qc.width_histogram.tsv"
+        empty_widths.write_text("width\tpeak_count\n", encoding="utf-8")
+
+        self.assertEqual(
+            qc.read_insert_size_distributions([insert, empty_insert]),
+            {
+                "S1": [
+                    {"insert_size": 100, "pair_count": 2},
+                    {"insert_size": 200, "pair_count": 1},
+                ],
+                "S2": [],
+            },
+        )
+        self.assertEqual(
+            qc.read_peak_width_distributions([widths, empty_widths]),
+            {
+                "S1": [
+                    {"width": 150, "peak_count": 3},
+                    {"width": 300, "peak_count": 1},
+                ],
+                "S2": [],
+            },
+        )
+
+    def test_distribution_parsers_reject_filename_and_row_identity_mismatch(self):
+        """A row must never be attached to the sample encoded by another file."""
+        workspace = self.make_workspace()
+        path = workspace / "S1.insert_size_distribution.tsv"
+        path.write_text(
+            "sample_id\tinsert_size\tpair_count\nS2\t100\t2\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "distribution sample_id S2 does not match filename sample_id S1",
+        ):
+            qc.read_insert_size_distributions([path])
+
 
 class TssAndAmeTests(unittest.TestCase):
     def make_workspace(self):
@@ -303,14 +371,8 @@ class TssAndAmeTests(unittest.TestCase):
         return Path(temporary_directory.name)
 
     def test_tss_enrichment_uses_center_and_terminal_100bp(self):
-        """The scalar score must use the center and both terminal 100-bp flanks."""
-        workspace = self.make_workspace()
-        values = [2.0] * 600
-        values[300] = 12.0
-        path = workspace / "S1.tss_profile.tsv"
-        path.write_text("sample\tgroup\t" + "\t".join(map(str, values)) + "\n", encoding="utf-8")
-
-        profile = qc.read_tss_profile(path)
+        """The pinned deepTools table drives the exact center/flank calculation."""
+        profile = qc.read_tss_profile(GOLDEN_DEEPTOOLS_PROFILE)
 
         self.assertEqual(profile[0], (-3000, 2.0))
         self.assertEqual(profile[300], (0, 12.0))
@@ -322,31 +384,40 @@ class TssAndAmeTests(unittest.TestCase):
 
         self.assertIsNone(qc.calculate_tss_enrichment(profile))
 
-    def test_read_tss_profile_rejects_wrong_bin_count_and_nonfinite_values(self):
-        """A profile with an incompatible schema cannot be joined to the report."""
+    def test_read_tss_profile_rejects_wrong_bin_count_and_noncontiguous_axis(self):
+        """The real deepTools header and one-based axis are part of the contract."""
         workspace = self.make_workspace()
         wrong_count = workspace / "wrong-count.tsv"
-        wrong_count.write_text("sample\t" + "\t".join(["1"] * 599) + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(qc.DashboardInputError, "600 numeric bins"):
+        lines = GOLDEN_DEEPTOOLS_PROFILE.read_text(encoding="utf-8").splitlines()
+        wrong_count.write_text(
+            "\n".join("\t".join(line.split("\t")[:-1]) for line in lines) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(qc.DashboardInputError, "602 tab-separated fields"):
             qc.read_tss_profile(wrong_count)
 
-        nonfinite = workspace / "nonfinite.tsv"
-        nonfinite.write_text("sample\t" + "\t".join(["1"] * 599 + ["nan"]) + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(qc.DashboardInputError, "must be finite"):
-            qc.read_tss_profile(nonfinite)
+        noncontiguous = workspace / "noncontiguous.tsv"
+        bins = lines[1].split("\t")
+        bins[302] = "999"
+        noncontiguous.write_text(
+            "\n".join((lines[0], "\t".join(bins), lines[2])) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(qc.DashboardInputError, "bins must be exactly 1 through 600"):
+            qc.read_tss_profile(noncontiguous)
 
     def test_read_tss_profile_rejects_missing_or_multiple_profiles(self):
         """The dashboard needs exactly one aggregate profile row per input file."""
         workspace = self.make_workspace()
         missing = workspace / "missing.tsv"
         missing.write_text("# no aggregate profile\n\n", encoding="utf-8")
-        with self.assertRaisesRegex(qc.DashboardInputError, "no TSS profile row"):
+        with self.assertRaisesRegex(qc.DashboardInputError, "exactly three non-comment rows"):
             qc.read_tss_profile(missing)
 
         multiple = workspace / "multiple.tsv"
-        row = "sample\t" + "\t".join(["1"] * 600) + "\n"
-        multiple.write_text(row + row, encoding="utf-8")
-        with self.assertRaisesRegex(qc.DashboardInputError, "multiple compatible"):
+        lines = GOLDEN_DEEPTOOLS_PROFILE.read_text(encoding="utf-8").splitlines()
+        multiple.write_text("\n".join((*lines, lines[2])) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(qc.DashboardInputError, "exactly three non-comment rows"):
             qc.read_tss_profile(multiple)
 
     def test_read_tss_profile_rejects_raw_multiregion_matrix(self):
@@ -361,8 +432,80 @@ class TssAndAmeTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with self.assertRaisesRegex(qc.DashboardInputError, "multiple compatible"):
+        with self.assertRaisesRegex(qc.DashboardInputError, "exactly three non-comment rows"):
             qc.read_tss_profile(path)
+
+    def test_nonfinite_and_zero_tss_flanks_become_missing_with_diagnostics(self):
+        """Unusable flank signal is reportable missing data, not a fatal join error."""
+        workspace = self.make_workspace()
+        lines = GOLDEN_DEEPTOOLS_PROFILE.read_text(encoding="utf-8").splitlines()
+        for sample_id, replacement, expected_status in (
+            ("ZERO", "0", "zero_flank"),
+            ("NONFINITE", "nan", "non_finite_flank"),
+        ):
+            data = lines[2].split("\t")
+            data[0] = "coverage"
+            data[2:12] = [replacement] * 10
+            data[-10:] = [replacement] * 10
+            (workspace / f"{sample_id}.tss_profile.tsv").write_text(
+                "\n".join((lines[0], lines[1], "\t".join(data))) + "\n",
+                encoding="utf-8",
+            )
+            (workspace / f"{sample_id}.tss_status.tsv").write_text(
+                "sample_id\tannotation_mode\tstatus\n"
+                f"{sample_id}\tbed\tcomputed\n",
+                encoding="utf-8",
+            )
+
+        metrics = qc._read_tss_metrics(workspace)
+
+        self.assertIsNone(metrics["ZERO"]["enrichment"])
+        self.assertEqual(metrics["ZERO"]["score_status"], "zero_flank")
+        self.assertIsNone(metrics["NONFINITE"]["enrichment"])
+        self.assertEqual(metrics["NONFINITE"]["score_status"], "non_finite_flank")
+
+    def test_tss_status_profile_identity_mismatches_are_explicit_failed_records(self):
+        """Partial TSS artifacts must not be silently promoted to computed results."""
+        workspace = self.make_workspace()
+        (workspace / "STATUS_ONLY.tss_status.tsv").write_text(
+            "sample_id\tannotation_mode\tstatus\n"
+            "STATUS_ONLY\tbed\tcomputed\n",
+            encoding="utf-8",
+        )
+        shutil.copyfile(
+            GOLDEN_DEEPTOOLS_PROFILE,
+            workspace / "PROFILE_ONLY.tss_profile.tsv",
+        )
+
+        metrics = qc._read_tss_metrics(workspace)
+
+        self.assertEqual(metrics["STATUS_ONLY"]["status"], "failed")
+        self.assertEqual(metrics["STATUS_ONLY"]["reason"], "profile_missing")
+        self.assertEqual(metrics["PROFILE_ONLY"]["status"], "failed")
+        self.assertEqual(metrics["PROFILE_ONLY"]["reason"], "status_missing")
+
+    def test_fake_plotprofile_output_is_byte_identical_to_pinned_golden_fixture(self):
+        """The offline tool must not mask production-format parser defects."""
+        workspace = self.make_workspace()
+        profile = workspace / "profile.png"
+        table = workspace / "profile.tsv"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "tests" / "data" / "e2e" / "fakebin" / "fake_bio_tool.py"),
+                "--fake-tool", "plotProfile",
+                "--matrixFile", str(workspace / "matrix.gz"),
+                "--outFileName", str(profile),
+                "--outFileNameData", str(table),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(table.read_bytes(), GOLDEN_DEEPTOOLS_PROFILE.read_bytes())
 
     def test_read_top_ame_ignores_no_peaks_and_orders_top_ten(self):
         """AME rankings must be deterministic and omit the pipeline's no-peaks sentinel."""
@@ -455,6 +598,123 @@ class ReportDataTests(unittest.TestCase):
                 annotation_status="skipped_no_annotation",
             )
 
+    def test_build_report_data_models_intentional_skips_without_generic_missing_status(self):
+        """Disabled optional analyses retain a skipped reason instead of looking lost."""
+        metadata = {
+            "S1": {
+                "sample_id": "S1", "library_id": "L1", "assay_target": "CTCF",
+                "is_control": False, "input_group": "25K", "control_id": "I1",
+                "expected_motif": "CTCF",
+            },
+            "I1": {
+                "sample_id": "I1", "library_id": "L1", "assay_target": "IgG",
+                "is_control": True, "input_group": "25K", "control_id": None,
+                "expected_motif": None,
+            },
+        }
+
+        data = qc.build_report_data(
+            metadata, {}, {}, {}, {}, {}, {},
+            annotation_status="skipped_no_annotation",
+            insert_sizes={},
+            peak_widths={},
+            motif_analysis_status="skipped_no_database",
+        )
+
+        target = data["samples_by_id"]["S1"]
+        self.assertEqual(
+            target["availability"]["tss"],
+            {"status": "skipped", "reason": "annotation_not_provided"},
+        )
+        self.assertEqual(target["tss"]["status"], "skipped_no_annotation")
+        self.assertEqual(
+            target["availability"]["motif"],
+            {"status": "skipped", "reason": "motif_database_not_provided"},
+        )
+        self.assertFalse(any(
+            "missing TSS metrics" in warning["message"]
+            or "missing motif metrics" in warning["message"]
+            for warning in data["warnings"]
+        ))
+        self.assertTrue(any(
+            warning["family"] == "tss" and warning["status"] == "skipped"
+            for warning in data["warnings"]
+        ))
+
+    def test_build_report_data_warns_for_partial_empty_failed_and_unusable_optional_results(self):
+        """Every unusable optional-family state remains distinguishable in the model."""
+        metadata = {
+            "A": {
+                "sample_id": "A", "library_id": "L1", "assay_target": "CTCF",
+                "is_control": False, "input_group": "25K", "control_id": "I",
+                "expected_motif": "CTCF",
+            },
+            "B": {
+                "sample_id": "B", "library_id": "L2", "assay_target": "GATA1",
+                "is_control": False, "input_group": "25K", "control_id": "I",
+                "expected_motif": "GATA1",
+            },
+            "I": {
+                "sample_id": "I", "library_id": "L1", "assay_target": "IgG",
+                "is_control": True, "input_group": "25K", "control_id": None,
+                "expected_motif": None,
+            },
+        }
+        data = qc.build_report_data(
+            metadata,
+            {},
+            {},
+            {"A": {"sample_id": "A", "peak_count": 0, "frip": None}},
+            {
+                "A": {
+                    "sample_id": "A", "status": "computed",
+                    "profile": [
+                        (index * 10 - 3000, 0.0)
+                        for index in range(600)
+                    ],
+                    "enrichment": None, "score_status": "zero_flank",
+                },
+                "B": {"sample_id": "B", "status": "failed", "profile": None},
+            },
+            {
+                "A": {"sample_id": "A", "status": "no_peaks", "ame_status": "no_peaks"},
+                "B": {"sample_id": "B", "status": "failed", "ame_status": "failed"},
+            },
+            {"A": [], "B": []},
+            annotation_status="computed_bed",
+            insert_sizes={"A": [], "B": []},
+            peak_widths={"A": []},
+            motif_analysis_status="computed",
+        )
+
+        a = data["samples_by_id"]["A"]
+        b = data["samples_by_id"]["B"]
+        self.assertEqual(a["availability"]["insert_size"]["status"], "empty")
+        self.assertEqual(a["availability"]["peak_width"]["status"], "empty")
+        self.assertEqual(a["availability"]["tss"]["status"], "computed")
+        self.assertEqual(a["tss"]["score_status"], "zero_flank")
+        self.assertEqual(a["availability"]["motif"]["status"], "empty")
+        self.assertEqual(a["availability"]["ame"]["status"], "empty")
+        self.assertEqual(b["availability"]["peak_width"]["status"], "missing")
+        self.assertEqual(b["availability"]["tss"]["status"], "failed")
+        self.assertEqual(b["availability"]["motif"]["status"], "failed")
+        self.assertEqual(b["availability"]["ame"]["status"], "failed")
+        observed = {
+            (warning["sample_id"], warning["family"], warning["status"])
+            for warning in data["warnings"]
+        }
+        self.assertTrue({
+            ("A", "insert_size", "empty"),
+            ("A", "peak_width", "empty"),
+            ("A", "tss", "computed"),
+            ("A", "motif", "empty"),
+            ("A", "ame", "empty"),
+            ("B", "peak_width", "missing"),
+            ("B", "tss", "failed"),
+            ("B", "motif", "failed"),
+            ("B", "ame", "failed"),
+        }.issubset(observed))
+
 
 class DashboardOutputTests(unittest.TestCase):
     """The outputs remain reproducible and safe to open without a network."""
@@ -518,6 +778,14 @@ class DashboardOutputTests(unittest.TestCase):
                 ],
             },
             annotation_status="computed_bed",
+            insert_sizes={
+                "A_IGG": [{"insert_size": 120, "pair_count": 3}],
+                "Z_TARGET": [{"insert_size": 150, "pair_count": 5}],
+            },
+            peak_widths={
+                "Z_TARGET": [{"width": 200, "peak_count": 2}],
+            },
+            motif_analysis_status="computed",
         )
         data["samples_by_id"]["Z_TARGET"]["warnings"].append(
             {"message": "Z_TARGET: NA warning & <visible>"}
@@ -537,15 +805,106 @@ class DashboardOutputTests(unittest.TestCase):
         with (workspace / "qc_summary.tsv").open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(list(rows[0]), qc.QC_SUMMARY_COLUMNS)
+        self.assertTrue({
+            "peak_width_min", "peak_width_q25", "peak_width_mean",
+            "peak_width_median", "peak_width_q75", "peak_width_max",
+        }.issubset(rows[0]))
         self.assertEqual(rows[0]["frip"], "")
         self.assertEqual([row["sample_id"] for row in rows], ["A_IGG", "Z_TARGET"])
+        self.assertEqual(rows[0]["is_control"], "true")
+        self.assertEqual(rows[1]["is_control"], "false")
         payload = json.loads((workspace / "qc_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            set(payload),
+            {
+                "schema_version", "generator_version", "annotation_status",
+                "counts", "availability", "metric_definitions", "samples",
+                "warnings",
+            },
+        )
         self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["generator_version"], "1.0.0")
+        self.assertEqual(
+            payload["counts"],
+            {"samples": 2, "targets": 1, "controls": 1, "warnings": 3},
+        )
+        self.assertEqual(
+            set(payload["availability"]),
+            {
+                "demultiplex", "library", "insert_size", "peak",
+                "peak_width", "tss", "motif", "ame",
+            },
+        )
+        self.assertEqual(
+            set(payload["availability"]["tss"]),
+            {
+                "status", "computed", "skipped", "empty", "missing",
+                "failed", "not_applicable",
+            },
+        )
+        self.assertEqual(
+            set(payload["samples"][0]),
+            {
+                "sample_id", "library_id", "input_group", "assay_target",
+                "is_control", "control_id", "expected_motif", "sample_kind",
+                "demultiplex", "library", "peak", "tss", "motif",
+                "availability", "top_motifs", "warnings",
+            },
+        )
         self.assertIsNone(payload["samples"][0]["peak"]["frip"])
         self.assertEqual(
             payload["metric_definitions"]["tss_enrichment"]["formula"],
             "center_bin_signal / mean(terminal_100bp_flanks)",
         )
+
+    def test_json_whitelist_blocks_arbitrary_producer_columns(self):
+        """Adding an internal producer column must not silently expand schema v1."""
+        workspace = self.make_workspace()
+        data = self.report_data()
+        data["samples_by_id"]["Z_TARGET"]["library"]["future_private_metric"] = 9
+
+        qc.write_qc_summary_json(data, workspace / "qc_summary.json")
+
+        payload = json.loads((workspace / "qc_summary.json").read_text(encoding="utf-8"))
+        target = next(row for row in payload["samples"] if row["sample_id"] == "Z_TARGET")
+        self.assertNotIn("future_private_metric", target["library"])
+
+    def test_distribution_inputs_change_public_json_and_dashboard(self):
+        """Both staged histogram families must affect consumer-visible outputs."""
+        workspace = self.make_workspace()
+        data = self.report_data()
+        data["samples_by_id"]["Z_TARGET"]["library"]["insert_size_distribution"] = [
+            {"insert_size": 147, "pair_count": 23},
+        ]
+        data["samples_by_id"]["Z_TARGET"]["peak"]["width_distribution"] = [
+            {"width": 321, "peak_count": 7},
+        ]
+        data["samples_by_id"]["Z_TARGET"]["availability"]["insert_size"] = {
+            "status": "computed", "reason": None,
+        }
+        data["samples_by_id"]["Z_TARGET"]["availability"]["peak_width"] = {
+            "status": "computed", "reason": None,
+        }
+
+        qc.write_outputs(data, workspace)
+
+        payload = json.loads((workspace / "qc_summary.json").read_text(encoding="utf-8"))
+        target = next(row for row in payload["samples"] if row["sample_id"] == "Z_TARGET")
+        self.assertEqual(
+            target["library"]["insert_size_distribution"],
+            [{"insert_size": 147, "pair_count": 23}],
+        )
+        self.assertEqual(
+            target["peak"]["width_distribution"],
+            [{"width": 321, "peak_count": 7}],
+        )
+        dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("Insert-size distribution", dashboard)
+        self.assertIn(">147<", dashboard)
+        self.assertIn(">23<", dashboard)
+        self.assertIn("Peak-width distribution", dashboard)
+        self.assertIn(">321<", dashboard)
+        self.assertIn(">7<", dashboard)
 
     def test_tidy_exports_exclude_controls_limit_motifs_and_order_rows(self):
         """Controls must not leak into motif biology and sortable exports stay stable."""
@@ -603,8 +962,73 @@ class DashboardOutputTests(unittest.TestCase):
         target_trace = re.search(r'<polyline[^>]*data-sample-kind="target"[^>]*>', html)
         self.assertIsNotNone(control_trace)
         self.assertIsNotNone(target_trace)
-        self.assertIn('stroke-dasharray="6 4"', control_trace.group())
-        self.assertNotIn("stroke-dasharray", target_trace.group())
+        self.assertIn('data-marker="square"', control_trace.group())
+        self.assertIn('data-marker="circle"', target_trace.group())
+
+    def test_dashboard_renders_approved_counts_scalars_control_peak_na_and_motif_status(self):
+        """Scalar fields already joined into the model must not disappear in HTML."""
+        data = self.report_data()
+        target = data["samples_by_id"]["Z_TARGET"]
+        target["demultiplex"].update({
+            "total_read_pairs": 101,
+            "assigned_read_pairs": 80,
+            "unassigned_read_pairs": 16,
+            "sample_assigned_reads": 50,
+        })
+        target["library"].update({
+            "raw_total_reads": 111,
+            "mapq_filtered_reads": 77,
+            "mapq_filtered_fragments": 38,
+            "mapq_filtered_fraction": 0.693,
+            "markdup_examined_reads": 100,
+            "duplicate_total": 12,
+            "duplicate_percent": 12,
+            "mitochondrial_percent": 1.5,
+            "estimated_library_size": 900,
+            "insert_size_total_pairs": 42,
+            "insert_size_min": 90,
+            "insert_size_q25": 110,
+            "insert_size_mean": 140,
+            "insert_size_median": 135,
+            "insert_size_q75": 160,
+            "insert_size_max": 220,
+        })
+        target["peak"].update({
+            "peak_count": 4,
+            "total_covered_bases": 1234,
+            "width_min": 100,
+            "width_q25": 125,
+            "width_mean": 175,
+            "width_median": 170,
+            "width_q75": 210,
+            "width_max": 300,
+            "total_fragments": 40,
+            "fragments_in_peaks": 10,
+            "frip": 0.25,
+        })
+
+        dashboard = qc.render_dashboard(data)
+
+        for text in (
+            "2 samples", "1 target", "1 control", "Input-family availability",
+            "Total read pairs", "Assigned read pairs", "Sample assigned reads",
+            "Raw reads", "MAPQ reads", "MAPQ fragments", "MAPQ fraction",
+            "Examined reads", "Duplicate reads", "Duplicate (%)",
+            "Mitochondrial (%)", "Estimated library size", "Insert pairs",
+            "Covered bases", "Width min", "Width Q25", "Width mean",
+            "Width median", "Width Q75", "Width max", "Usable fragments",
+            "Fragments in peaks", "Best adjusted significance", "AME status",
+        ):
+            self.assertIn(text, dashboard)
+        peak_table = re.search(
+            r'aria-label="Peaks and FRiP table".*?</table>',
+            dashboard,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(peak_table)
+        self.assertRegex(peak_table.group(), r"A_IGG.*?NA.*?NA")
+        self.assertIn("0.001", dashboard)
+        self.assertIn("computed", dashboard)
 
     def test_dashboard_tables_are_scrollable_without_page_width_overflow(self):
         """Narrow viewports need per-table scrolling instead of a clipped page."""
@@ -624,58 +1048,75 @@ class DashboardOutputTests(unittest.TestCase):
         )
 
     def test_dashboard_tables_have_unique_context_specific_accessible_names(self):
-        """Assistive technology must distinguish all eight scrollable data regions."""
+        """Assistive technology must distinguish every scrollable data region."""
         html = qc.render_dashboard(self.report_data())
 
+        names = re.findall(
+            r'<div class="table-scroll" role="region" '
+            r'aria-label="([^"]+)" tabindex="0">',
+            html,
+        )
+        self.assertEqual(len(names), len(set(names)))
         self.assertEqual(
-            re.findall(
-                r'<div class="table-scroll" role="region" '
-                r'aria-label="([^"]+)" tabindex="0">',
-                html,
-            ),
-            [
+            set(names),
+            {
                 "Run overview table",
+                "Input-family availability table",
                 "Demultiplexing metrics table",
                 "Alignment and library QC table",
+                "Insert-size distribution table",
                 "Peaks and FRiP table",
+                "Peak-width distribution table",
                 "TSS enrichment table",
                 "Expected motif table",
                 "Top AME motifs table",
                 "Warnings table",
-            ],
-        )
-
-    def test_line_chart_series_labels_have_nonoverlapping_vertical_spacing(self):
-        """Adjacent TSS series labels need enough baseline spacing for rendered text."""
-        chart = qc.render_line_chart(
-            "TSS profiles",
-            {
-                "A_IGG": {"profile": [(-10, 1), (10, 2)], "is_control": True},
-                "Z_TARGET": {"profile": [(-10, 2), (10, 4)], "is_control": False},
             },
         )
 
-        label_positions = {
-            label: float(position)
-            for position, label in re.findall(
-                r'<text x="622" y="([0-9.]+)" text-anchor="end" '
-                r'fill="[^"]+">([^<]+)</text>',
-                chart,
-            )
-        }
-        self.assertIn('viewBox="0 0 640 260"', chart)
-        self.assertEqual(set(label_positions), {"A_IGG", "Z_TARGET"})
-        self.assertGreaterEqual(
-            label_positions["Z_TARGET"] - label_positions["A_IGG"],
-            20,
+    def test_bar_chart_scales_to_one_hundred_long_labels_without_overlap(self):
+        """A fixed plot width must not collapse realistic cohorts into overlapping bars."""
+        chart = qc.render_bar_chart(
+            "Mapped reads",
+            [
+                {
+                    "sample_id": f"long_sample_identifier_{index:03d}_replicate_alpha",
+                    "mapped_percent": index + 1,
+                    "is_control": index % 10 == 0,
+                }
+                for index in range(100)
+            ],
+            value_key="mapped_percent",
         )
 
-    def test_line_chart_expands_to_keep_twelve_series_labels_inside_viewbox(self):
-        """Large cohorts need every nonoverlapping label fully inside the SVG."""
+        viewbox = re.search(r'viewBox="0 0 ([0-9.]+) ([0-9.]+)"', chart)
+        self.assertIsNotNone(viewbox)
+        self.assertGreater(float(viewbox.group(1)), 640)
+        bars = [
+            (float(x), float(width))
+            for x, width in re.findall(
+                r'<rect class="bar" x="([0-9.]+)"[^>]*width="([0-9.]+)"',
+                chart,
+            )
+        ]
+        self.assertEqual(len(bars), 100)
+        self.assertTrue(all(
+            left_x + left_width <= right_x
+            for (left_x, left_width), (right_x, _) in zip(bars, bars[1:])
+        ))
+        self.assertIn(
+            '<div class="chart-scroll" role="region" '
+            'aria-label="Mapped reads chart" tabindex="0">',
+            chart,
+        )
+        self.assertIn("long_sample_identifier_099_replicate_alpha", chart)
+
+    def test_line_chart_uses_fixed_plot_and_unique_non_color_mapping_for_many_targets(self):
+        """More than five TSS profiles need a textual/style key independent of color."""
         chart = qc.render_line_chart(
             "TSS profiles",
             {
-                f"S{index:02d}": {
+                f"long_target_sample_{index:02d}": {
                     "profile": [(-10, 1), (10, index + 1)],
                     "is_control": index == 0,
                 }
@@ -685,25 +1126,30 @@ class DashboardOutputTests(unittest.TestCase):
 
         viewbox = re.search(r'viewBox="0 0 640 ([0-9.]+)"', chart)
         self.assertIsNotNone(viewbox)
-        height = float(viewbox.group(1))
-        label_positions = [
-            float(position)
-            for position in re.findall(
-                r'<text x="622" y="([0-9.]+)" text-anchor="end" '
-                r'fill="[^"]+">S[0-9]+</text>',
-                chart,
-            )
-        ]
-        self.assertEqual(len(label_positions), 12)
-        self.assertGreater(height, 260)
-        self.assertTrue(
-            all(20 <= position <= height - 20 for position in label_positions)
+        self.assertLessEqual(float(viewbox.group(1)), 320)
+        traces = re.findall(
+            r'<polyline[^>]*data-series-key="([^"]+)"[^>]*'
+            r'data-sample-kind="([^"]+)"[^>]*'
+            r'data-marker="([^"]+)"[^>]*'
+            r'stroke-dasharray="([^"]+)"',
+            chart,
         )
+        self.assertEqual(len(traces), 12)
+        self.assertEqual(len({key for key, _, _, _ in traces}), 12)
+        self.assertEqual(len({dash for _, _, _, dash in traces}), 12)
+        self.assertEqual(traces[0][1:3], ("control", "square"))
         self.assertTrue(
-            all(
-                right - left >= 20
-                for left, right in zip(label_positions, label_positions[1:])
-            )
+            all(marker == "circle" for _, kind, marker, _ in traces if kind == "target")
+        )
+        legend_pairs = re.findall(
+            r'<span class="series-key">([^<]+)</span>'
+            r'<span class="series-label">([^<]+)</span>',
+            chart,
+        )
+        self.assertEqual(len(legend_pairs), 12)
+        self.assertEqual(
+            {label for _, label in legend_pairs},
+            {f"long_target_sample_{index:02d}" for index in range(12)},
         )
 
     def test_cli_publishes_a_complete_output_set_and_reports_input_errors(self):
@@ -733,13 +1179,47 @@ class DashboardOutputTests(unittest.TestCase):
         (directories["library"] / "S1.library_qc.tsv").write_text(
             "sample_id\tmapped_percent\nS1\t95\n", encoding="utf-8"
         )
+        (directories["library"] / "I1.library_qc.tsv").write_text(
+            "sample_id\tmapped_percent\nI1\t90\n", encoding="utf-8"
+        )
+        for sample_id, insert_size, pair_count in (("S1", 147, 3), ("I1", 121, 1)):
+            (directories["insert"] / f"{sample_id}.insert_size_distribution.tsv").write_text(
+                "sample_id\tinsert_size\tpair_count\n"
+                f"{sample_id}\t{insert_size}\t{pair_count}\n",
+                encoding="utf-8",
+            )
+            shutil.copyfile(
+                GOLDEN_DEEPTOOLS_PROFILE,
+                directories["tss"] / f"{sample_id}.tss_profile.tsv",
+            )
+            (directories["tss"] / f"{sample_id}.tss_status.tsv").write_text(
+                "sample_id\tannotation_mode\tstatus\n"
+                f"{sample_id}\tbed\tcomputed\n",
+                encoding="utf-8",
+            )
+        (directories["peak"] / "S1.peak_qc.tsv").write_text(
+            "metric\tvalue\n"
+            "sample_id\tS1\n"
+            "peak_count\t1\n"
+            "total_covered_bases\t321\n"
+            "total_fragments\t4\n"
+            "fragments_in_peaks\t1\n"
+            "frip\t0.25\n",
+            encoding="utf-8",
+        )
+        (directories["peak"] / "S1.peak_qc.width_histogram.tsv").write_text(
+            "width\tpeak_count\n321\t1\n",
+            encoding="utf-8",
+        )
         outdir = workspace / "dashboard"
         arguments = [
             "--metadata", str(metadata), "--demux-dir", str(directories["demux"]),
             "--library-dir", str(directories["library"]), "--insert-dir", str(directories["insert"]),
             "--peak-dir", str(directories["peak"]), "--tss-dir", str(directories["tss"]),
             "--motif-dir", str(directories["motif"]), "--ame-dir", str(directories["ame"]),
-            "--annotation-status", "computed_bed", "--outdir", str(outdir),
+            "--annotation-status", "computed_bed",
+            "--motif-analysis-status", "skipped_no_database",
+            "--outdir", str(outdir),
         ]
 
         self.assertEqual(qc.main(arguments), 0)
@@ -747,12 +1227,70 @@ class DashboardOutputTests(unittest.TestCase):
             {path.name for path in outdir.iterdir()},
             {"qc_dashboard.html", "qc_summary.tsv", "qc_summary.json", "top_motifs.tsv", "tss_profiles.tsv"},
         )
+        with (outdir / "qc_summary.tsv").open(encoding="utf-8", newline="") as handle:
+            rows = {row["sample_id"]: row for row in csv.DictReader(handle, delimiter="\t")}
+        self.assertEqual(rows["S1"]["tss_enrichment"], "6")
+        payload = json.loads((outdir / "qc_summary.json").read_text(encoding="utf-8"))
+        target = next(row for row in payload["samples"] if row["sample_id"] == "S1")
+        self.assertEqual(
+            target["library"]["insert_size_distribution"],
+            [{"insert_size": 147, "pair_count": 3}],
+        )
+        self.assertEqual(
+            target["peak"]["width_distribution"],
+            [{"width": 321, "peak_count": 1}],
+        )
         error = io.StringIO()
         with contextlib.redirect_stderr(error):
             result = qc.main(["--metadata", str(workspace / "missing.json"), *arguments[2:]])
         self.assertEqual(result, 2)
         self.assertIn("qc_dashboard.py: error:", error.getvalue())
         self.assertTrue((outdir / "qc_dashboard.html").is_file())
+
+    def test_atomic_bundle_publication_rolls_back_after_each_directory_replace(self):
+        """Injected publication faults must leave the complete prior five-file set."""
+        workspace = self.make_workspace()
+        names = (
+            "qc_dashboard.html", "qc_summary.tsv", "qc_summary.json",
+            "top_motifs.tsv", "tss_profiles.tsv",
+        )
+        data = {
+            "schema_version": 1,
+            "annotation_status": "skipped_no_annotation",
+            "samples": [],
+            "warnings": [],
+        }
+        for fail_after in (1, 2):
+            with self.subTest(fail_after=fail_after):
+                outdir = workspace / f"dashboard-{fail_after}"
+                outdir.mkdir()
+                for name in names:
+                    (outdir / name).write_bytes(f"OLD::{name}\n".encode())
+                calls = 0
+
+                def replace_then_fail(source, destination):
+                    nonlocal calls
+                    os.replace(source, destination)
+                    calls += 1
+                    if calls == fail_after:
+                        raise OSError(f"injected fault after replace {fail_after}")
+
+                with mock.patch.object(
+                    qc, "_replace_path", side_effect=replace_then_fail, create=True
+                ):
+                    with self.assertRaisesRegex(
+                        OSError, f"injected fault after replace {fail_after}"
+                    ):
+                        qc.write_outputs_atomically(data, outdir)
+
+                self.assertEqual(
+                    {path.name: path.read_bytes() for path in outdir.iterdir()},
+                    {name: f"OLD::{name}\n".encode() for name in names},
+                )
+                self.assertEqual(
+                    list(workspace.glob(f".{outdir.name}.*")),
+                    [],
+                )
 
 
 if __name__ == "__main__":
