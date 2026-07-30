@@ -221,7 +221,16 @@ PY
         --ame-dir "dashboard_inputs/normalized_ame" \
         --annotation-status "${annotationStatus}" \
         --motif-analysis-status "${motifAnalysisStatus}" \
-        --outdir "."
+        --outdir "dashboard_bundle"
+
+    mv \
+        "dashboard_bundle/qc_dashboard.html" \
+        "dashboard_bundle/qc_summary.tsv" \
+        "dashboard_bundle/qc_summary.json" \
+        "dashboard_bundle/top_motifs.tsv" \
+        "dashboard_bundle/tss_profiles.tsv" \
+        .
+    rmdir "dashboard_bundle"
 
     cat > "qc_dashboard_versions.yml" <<'EOF'
 QC_DASHBOARD:

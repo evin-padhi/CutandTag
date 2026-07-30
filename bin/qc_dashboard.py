@@ -57,6 +57,13 @@ TOP_MOTIF_COLUMNS = [
     "positive_sequences",
 ]
 TSS_PROFILE_COLUMNS = ["sample_id", "position_bp", "signal"]
+DASHBOARD_OUTPUT_FILENAMES = (
+    "qc_dashboard.html",
+    "qc_summary.tsv",
+    "qc_summary.json",
+    "top_motifs.tsv",
+    "tss_profiles.tsv",
+)
 
 DEMULTIPLEX_FIELDS = tuple(QC_SUMMARY_COLUMNS[7:16])
 LIBRARY_FIELDS = (
@@ -66,6 +73,27 @@ LIBRARY_FIELDS = (
     "mitochondrial_percent", "estimated_library_size", "insert_size_total_pairs",
     "insert_size_min", "insert_size_q25", "insert_size_mean",
     "insert_size_median", "insert_size_q75", "insert_size_max",
+)
+LIBRARY_REQUIRED_VALUE_FIELDS = (
+    "raw_total_reads", "mapped_percent", "properly_paired_percent",
+    "mapq_filtered_reads", "mapq_filtered_fragments", "mapq_filtered_fraction",
+    "markdup_examined_reads", "duplicate_total", "duplicate_percent",
+    "mitochondrial_percent", "insert_size_total_pairs",
+)
+PEAK_PRODUCER_FIELDS = (
+    "peak_count", "total_covered_bases",
+    "peak_width_min", "peak_width_mean", "peak_width_median",
+    "peak_width_max", "peak_width_q25", "peak_width_q75",
+    "peak_score_count", "peak_score_min", "peak_score_q25",
+    "peak_score_mean", "peak_score_median", "peak_score_q75",
+    "peak_score_max", "signal_value_count", "signal_value_min",
+    "signal_value_q25", "signal_value_mean", "signal_value_median",
+    "signal_value_q75", "signal_value_max", "total_fragments",
+    "fragments_in_peaks", "frip",
+)
+PEAK_REQUIRED_VALUE_FIELDS = (
+    "peak_count", "total_covered_bases", "peak_score_count",
+    "signal_value_count", "total_fragments", "fragments_in_peaks", "frip",
 )
 PEAK_FIELDS = (
     "peak_count", "total_covered_bases", "width_count", "width_min",
@@ -240,6 +268,25 @@ def read_demultiplex_metrics(
                     if inferred_library_ids else "assignment_counts cannot determine library_id"
                 )
             library_id = next(iter(inferred_library_ids))
+        if metadata is not None:
+            expected_sample_ids = {
+                sample_id
+                for sample_id, record in metadata.items()
+                if _required_text(
+                    record, "library_id", label=f"metadata {sample_id}"
+                ) == library_id
+            }
+            if set(assignment_counts) != expected_sample_ids:
+                missing = sorted(expected_sample_ids - set(assignment_counts))
+                extra = sorted(set(assignment_counts) - expected_sample_ids)
+                detail = (
+                    f"; missing {missing[0]}" if missing
+                    else f"; unexpected {extra[0]}"
+                )
+                raise DashboardInputError(
+                    f"assignment_counts for {library_id} must exactly match "
+                    f"metadata samples{detail}"
+                )
         if library_id in parsed:
             raise DashboardInputError(f"duplicate library_id {library_id}")
         total = counts["total_reads"]
@@ -269,10 +316,23 @@ def _read_tsv(path: Path, *, label: str) -> tuple[list[str], list[dict[str, str]
         raise DashboardInputError(f"cannot read {label} file {path}: {error}") from error
 
 
-def _read_single_sample_tsv(paths: Sequence[Path], *, label: str) -> dict[str, dict[str, object]]:
+def _read_single_sample_tsv(
+    paths: Sequence[Path],
+    *,
+    label: str,
+    expected_fields: Sequence[str] | None = None,
+    required_value_fields: Sequence[str] = (),
+) -> dict[str, dict[str, object]]:
     parsed: dict[str, dict[str, object]] = {}
     for path in paths:
         headers, rows = _read_tsv(path, label=label)
+        if (
+            expected_fields is not None
+            and headers != ["sample_id", *expected_fields]
+        ):
+            raise DashboardInputError(
+                f"{path}: {label} columns must exactly match the producer schema"
+            )
         if "sample_id" not in headers or len(rows) != 1:
             raise DashboardInputError(f"{path}: {label} must contain exactly one sample_id row")
         raw = rows[0]
@@ -283,7 +343,11 @@ def _read_single_sample_tsv(paths: Sequence[Path], *, label: str) -> dict[str, d
         for name, value in raw.items():
             if name == "sample_id":
                 continue
-            record[name] = None if not value.strip() else finite_number(
+            if name in required_value_fields and _is_blank(value):
+                raise DashboardInputError(
+                    f"{path}: required {label} field {name} is empty"
+                )
+            record[name] = None if _is_blank(value) else finite_number(
                 value, label=f"{sample_id} {name}", minimum=0
             )
         parsed[sample_id] = record
@@ -292,7 +356,12 @@ def _read_single_sample_tsv(paths: Sequence[Path], *, label: str) -> dict[str, d
 
 def read_library_metrics(paths: Sequence[Path]) -> dict[str, dict[str, object]]:
     """Read one library-QC summary row for every derived sample."""
-    return _read_single_sample_tsv(paths, label="library metrics")
+    return _read_single_sample_tsv(
+        paths,
+        label="library metrics",
+        expected_fields=LIBRARY_FIELDS,
+        required_value_fields=LIBRARY_REQUIRED_VALUE_FIELDS,
+    )
 
 
 def read_peak_metrics(paths: Sequence[Path]) -> dict[str, dict[str, object]]:
@@ -310,6 +379,19 @@ def read_peak_metrics(paths: Sequence[Path]) -> dict[str, dict[str, object]]:
             if metric in raw_metrics:
                 raise DashboardInputError(f"duplicate peak metric {metric}")
             raw_metrics[metric] = row["value"]
+        expected_metrics = {"sample_id", *PEAK_PRODUCER_FIELDS}
+        missing_metrics = sorted(expected_metrics - set(raw_metrics))
+        if missing_metrics:
+            raise DashboardInputError(
+                f"{path}: peak metrics are missing required producer fields: "
+                f"{missing_metrics[0]}"
+            )
+        unexpected_metrics = sorted(set(raw_metrics) - expected_metrics)
+        if unexpected_metrics:
+            raise DashboardInputError(
+                f"{path}: peak metrics contain unexpected producer field "
+                f"{unexpected_metrics[0]}"
+            )
         sample_id = raw_metrics.get("sample_id", "").strip()
         if not sample_id:
             raise DashboardInputError(f"{path}: peak sample_id is required")
@@ -318,9 +400,28 @@ def read_peak_metrics(paths: Sequence[Path]) -> dict[str, dict[str, object]]:
         record: dict[str, object] = {"sample_id": sample_id}
         for metric, value in raw_metrics.items():
             if metric != "sample_id":
-                record[metric] = None if not value.strip() else finite_number(
+                if metric in PEAK_REQUIRED_VALUE_FIELDS and not value.strip():
+                    raise DashboardInputError(
+                        f"{path}: required peak metric {metric} is empty"
+                    )
+                internal_metric = (
+                    metric.removeprefix("peak_")
+                    if metric.startswith("peak_width_")
+                    else metric
+                )
+                record[internal_metric] = None if not value.strip() else finite_number(
                     value, label=f"{sample_id} peak {metric}", minimum=0
                 )
+        record["width_count"] = record["peak_count"]
+        if record["peak_count"]:
+            for metric in (
+                "width_min", "width_mean", "width_median",
+                "width_max", "width_q25", "width_q75",
+            ):
+                if record[metric] is None:
+                    raise DashboardInputError(
+                        f"{path}: peak metric {metric} is required when peaks exist"
+                    )
         parsed[sample_id] = record
     return dict(sorted(parsed.items()))
 
@@ -1174,10 +1275,14 @@ def write_tss_profiles_tsv(data: Mapping[str, object], path: Path) -> None:
     _write_tsv(path, TSS_PROFILE_COLUMNS, _tss_profile_rows(data))
 
 
-def render_table(columns, rows, *, empty_message, aria_label):
+def render_table(
+    columns, rows, *, empty_message, aria_label, row_limit: int | None = None
+):
     """Render an escaped HTML table, including an explicit empty-state message."""
-    if not rows:
+    all_rows = list(rows)
+    if not all_rows:
         return f'<p class="empty">{html.escape(empty_message)}</p>'
+    visible_rows = all_rows[:row_limit] if row_limit is not None else all_rows
     header = "".join(f"<th>{html.escape(label)}</th>" for _, label in columns)
     body = "".join(
         "<tr>"
@@ -1186,14 +1291,22 @@ def render_table(columns, rows, *, empty_message, aria_label):
             for key, _ in columns
         )
         + "</tr>"
-        for row in rows
+        for row in visible_rows
     )
-    return (
+    table = (
         '<div class="table-scroll" role="region" '
         f'aria-label="{html.escape(aria_label)}" tabindex="0">'
         f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
         "</div>"
     )
+    if len(visible_rows) != len(all_rows):
+        table += (
+            '<p class="table-note">'
+            f"Showing the first {len(visible_rows)} of {len(all_rows)} rows; "
+            "the complete distribution is retained in qc_summary.json."
+            "</p>"
+        )
+    return table
 
 
 def render_bar_chart(
@@ -1215,7 +1328,8 @@ def render_bar_chart(
     maximum = max((max(value, 0.0) for _, value, _ in numeric_rows), default=0.0) or 1.0
     longest_label = max(len(label) for label, _, _ in numeric_rows)
     slot_width = max(64.0, min(220.0, longest_label * 7.0 + 22.0))
-    left, right, height, plot_bottom = 60.0, 24.0, 330.0, 220.0
+    left, right, plot_bottom = 60.0, 24.0, 220.0
+    height = max(330.0, plot_bottom + longest_label * 5.0 + 36.0)
     width = max(640.0, left + right + slot_width * len(numeric_rows))
     plot_height = plot_bottom - 32.0
     bar_width = slot_width * 0.64
@@ -1251,9 +1365,162 @@ def render_bar_chart(
         'patternTransform="rotate(45)"><line x1="0" y1="0" x2="0" y2="6" '
         'stroke="#334155" stroke-width="2"/></pattern></defs>'
         f'<text x="{left}" y="18" class="chart-title">{html.escape(title)}</text>'
-        f'<text x="16" y="{height / 2:.1f}" transform="rotate(-90 16 {height / 2:.1f})">{html.escape(axis_label)}</text>'
+        f'<text x="16" y="{plot_bottom / 2:.1f}" '
+        f'transform="rotate(-90 16 {plot_bottom / 2:.1f})">{html.escape(axis_label)}</text>'
         f'<line x1="{left}" y1="{plot_bottom}" x2="{width - right}" y2="{plot_bottom}" class="axis"/>'
         + "".join(bars) + "</svg></div>"
+    )
+
+
+def _series_style(index: int, is_control: bool) -> tuple[str, str, str, str, str]:
+    palette = ("#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c")
+    return (
+        f"S{index + 1:02d}",
+        palette[index % len(palette)],
+        "control" if is_control else "target",
+        "square" if is_control else "circle",
+        f"{index + 2} {index + 3}",
+    )
+
+
+def _series_marker(
+    x: float, y: float, *, color: str, marker: str, tooltip: str
+) -> str:
+    if marker == "square":
+        return (
+            f'<rect x="{x - 3:.1f}" y="{y - 3:.1f}" width="6" height="6" '
+            f'fill="{color}"><title>{html.escape(tooltip)}</title></rect>'
+        )
+    return (
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" '
+        f'fill="{color}"><title>{html.escape(tooltip)}</title></circle>'
+    )
+
+
+def _series_legend_entry(
+    series_key: str,
+    sample_id: str,
+    *,
+    color: str,
+    kind: str,
+    marker: str,
+    dash: str,
+) -> str:
+    swatch_marker = (
+        f'<rect x="17" y="2" width="6" height="6" fill="{color}"/>'
+        if marker == "square"
+        else f'<circle cx="20" cy="5" r="3" fill="{color}"/>'
+    )
+    return (
+        '<li>'
+        '<svg class="series-swatch" viewBox="0 0 40 10" '
+        'aria-hidden="true" focusable="false">'
+        f'<line x1="0" y1="5" x2="40" y2="5" stroke="{color}" '
+        f'stroke-width="2" stroke-dasharray="{dash}"/>{swatch_marker}</svg>'
+        f'<span class="series-key">{series_key}</span>'
+        f'<span class="series-label">{html.escape(sample_id)}</span>'
+        f'<span class="series-kind"> ({kind}; {marker})</span>'
+        '</li>'
+    )
+
+
+def _downsample_profile(
+    profile: Sequence[tuple[float, float]], *, limit: int = 600
+) -> list[tuple[float, float]]:
+    """Retain local maxima when a series has more points than display pixels."""
+    ordered = sorted(profile)
+    if len(ordered) <= limit:
+        return ordered
+    chunk_size = math.ceil(len(ordered) / limit)
+    sampled = [
+        max(ordered[index:index + chunk_size], key=lambda point: point[1])
+        for index in range(0, len(ordered), chunk_size)
+    ]
+    return sampled
+
+
+def render_distribution_chart(
+    title: str,
+    rows: Sequence[Mapping[str, object]],
+    *,
+    x_key: str,
+    value_key: str,
+    x_axis_label: str,
+    y_axis_label: str,
+) -> str:
+    """Render fixed-width numeric distributions with one trace per sample."""
+    grouped: dict[str, tuple[bool, list[tuple[float, float]]]] = {}
+    for row in rows:
+        try:
+            x_value = float(row.get(x_key))
+            y_value = float(row.get(value_key))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(x_value) or not math.isfinite(y_value):
+            continue
+        sample_id = str(row.get("sample_id", ""))
+        if sample_id not in grouped:
+            grouped[sample_id] = (bool(row.get("is_control")), [])
+        grouped[sample_id][1].append((x_value, max(y_value, 0.0)))
+    if not grouped:
+        return (
+            f'<p class="empty">{html.escape("No numeric data available for " + title)}</p>'
+        )
+    all_points = [
+        point for _, profile in grouped.values() for point in profile
+    ]
+    x_min = min(point[0] for point in all_points)
+    x_max = max(point[0] for point in all_points)
+    y_max = max(point[1] for point in all_points) or 1.0
+    x_span = x_max - x_min or 1.0
+    width, height, left, right, plot_bottom = 640, 280, 60, 24, 234
+    plot_height = plot_bottom - 32
+    traces = []
+    legend = []
+    for index, (sample_id, (is_control, raw_profile)) in enumerate(
+        sorted(grouped.items())
+    ):
+        profile = _downsample_profile(raw_profile)
+        plotted = [
+            (
+                left + (x_value - x_min) / x_span * (width - left - right),
+                plot_bottom - y_value / y_max * plot_height,
+            )
+            for x_value, y_value in profile
+        ]
+        coordinates = " ".join(f"{x:.1f},{y:.1f}" for x, y in plotted)
+        series_key, color, kind, marker, dash = _series_style(index, is_control)
+        tooltip = f"{sample_id}: {title} ({kind})"
+        marker_x, marker_y = plotted[-1]
+        traces.append(
+            f'<polyline data-series-key="{series_key}" data-sample-kind="{kind}" '
+            f'data-marker="{marker}" points="{coordinates}" fill="none" '
+            f'stroke="{color}" stroke-width="2" stroke-dasharray="{dash}">'
+            f'<title>{html.escape(tooltip)}</title></polyline>'
+            + _series_marker(
+                marker_x, marker_y, color=color, marker=marker, tooltip=tooltip
+            )
+        )
+        legend.append(
+            _series_legend_entry(
+                series_key, sample_id, color=color, kind=kind,
+                marker=marker, dash=dash,
+            )
+        )
+    return (
+        '<div class="line-chart">'
+        f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="{html.escape(title)}"><title>{html.escape(title)}</title>'
+        f'<text x="{left}" y="18" class="chart-title">{html.escape(title)}</text>'
+        f'<text x="16" y="{plot_bottom / 2:.1f}" '
+        f'transform="rotate(-90 16 {plot_bottom / 2:.1f})">'
+        f'{html.escape(y_axis_label)}</text>'
+        f'<text x="{width / 2:.1f}" y="{height - 6}" text-anchor="middle">'
+        f'{html.escape(x_axis_label)}</text>'
+        f'<line x1="{left}" y1="{plot_bottom}" x2="{width - right}" '
+        f'y2="{plot_bottom}" class="axis"/>'
+        + "".join(traces) + '</svg><ol class="series-legend">'
+        + "".join(legend) + "</ol></div>"
     )
 
 
@@ -1297,7 +1564,6 @@ def render_line_chart(title: str, profiles: Mapping[str, object]) -> str:
         grouped[sample_id][1].append((position, signal))
     plot_bottom = height - bottom
     plot_height = plot_bottom - 32
-    palette = ("#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c")
     paths = []
     legend = []
     for index, (sample_id, (is_control, profile)) in enumerate(sorted(grouped.items())):
@@ -1309,32 +1575,23 @@ def render_line_chart(title: str, profiles: Mapping[str, object]) -> str:
             for position, signal in sorted(profile)
         ]
         coordinates = " ".join(f"{x:.1f},{y:.1f}" for x, y in plotted)
-        color = palette[index % len(palette)]
-        kind = "control" if is_control else "target"
-        marker = "square" if is_control else "circle"
-        series_key = f"S{index + 1:02d}"
-        dash = f"{index + 2} {index + 3}"
+        series_key, color, kind, marker, dash = _series_style(index, is_control)
         tooltip = f"{sample_id}: TSS profile ({kind})"
         marker_x, marker_y = plotted[-1]
-        marker_element = (
-            f'<rect x="{marker_x - 3:.1f}" y="{marker_y - 3:.1f}" width="6" height="6" '
-            f'fill="{color}"><title>{html.escape(tooltip)}</title></rect>'
-            if is_control
-            else f'<circle cx="{marker_x:.1f}" cy="{marker_y:.1f}" r="3" '
-            f'fill="{color}"><title>{html.escape(tooltip)}</title></circle>'
-        )
         paths.append(
             f'<polyline data-series-key="{series_key}" data-sample-kind="{kind}" '
             f'data-marker="{marker}" points="{coordinates}" fill="none" stroke="{color}" '
             f'stroke-width="2" stroke-dasharray="{dash}">'
-            f'<title>{html.escape(tooltip)}</title></polyline>{marker_element}'
+            f'<title>{html.escape(tooltip)}</title></polyline>'
+            + _series_marker(
+                marker_x, marker_y, color=color, marker=marker, tooltip=tooltip
+            )
         )
         legend.append(
-            '<li>'
-            f'<span class="series-key">{series_key}</span>'
-            f'<span class="series-label">{html.escape(sample_id)}</span>'
-            f'<span class="series-kind"> ({kind}; {marker}; dash {dash})</span>'
-            '</li>'
+            _series_legend_entry(
+                series_key, sample_id, color=color, kind=kind,
+                marker=marker, dash=dash,
+            )
         )
     return (
         '<div class="line-chart">'
@@ -1366,8 +1623,10 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         '</p>'
     )
     overview = render_table(
-        [("sample_id", "Sample"), ("assay_target", "Target"),
-         ("sample_kind", "Sample kind"), ("is_control", "IgG control"),
+        [("sample_id", "Sample"), ("library_id", "Physical library"),
+         ("input_group", "Input group"), ("assay_target", "Target"),
+         ("sample_kind", "Sample kind"), ("control_id", "Matched control"),
+         ("expected_motif", "Expected motif"), ("is_control", "IgG control"),
          ("annotation_status", "Annotation status")],
         [{**sample, "annotation_status": data.get("annotation_status")} for sample in samples],
         empty_message="No samples were supplied",
@@ -1435,19 +1694,20 @@ def render_dashboard(data: Mapping[str, object]) -> str:
                 insert_rows.append({
                     "sample_id": sample.get("sample_id"),
                     "is_control": sample.get("is_control"),
-                    "label": f"{sample.get('sample_id')}: {format_value(row.get('insert_size'))}",
                     "insert_size": row.get("insert_size"),
                     "pair_count": row.get("pair_count"),
                 })
-    insert = render_bar_chart(
-        "Insert-size distribution", insert_rows, value_key="pair_count",
-        label_key="label", axis_label="Read pairs",
+    insert = render_distribution_chart(
+        "Insert-size distribution", insert_rows,
+        x_key="insert_size", value_key="pair_count",
+        x_axis_label="Insert size (bp)", y_axis_label="Read pairs",
     )
     insert += render_table(
         [("sample_id", "Sample"), ("insert_size", "Insert size (bp)"),
          ("pair_count", "Read pairs")],
         insert_rows, empty_message="No insert-size distribution data available",
         aria_label="Insert-size distribution table",
+        row_limit=2000,
     )
     peak_rows = [row for row in summary_rows if not row.get("is_control")]
     peaks = render_bar_chart("FRiP", peak_rows, value_key="frip", axis_label="FRiP")
@@ -1473,19 +1733,20 @@ def render_dashboard(data: Mapping[str, object]) -> str:
                 peak_width_rows.append({
                     "sample_id": sample.get("sample_id"),
                     "is_control": sample.get("is_control"),
-                    "label": f"{sample.get('sample_id')}: {format_value(row.get('width'))}",
                     "width": row.get("width"),
                     "peak_count": row.get("peak_count"),
                 })
-    peak_width = render_bar_chart(
-        "Peak-width distribution", peak_width_rows, value_key="peak_count",
-        label_key="label", axis_label="Peaks",
+    peak_width = render_distribution_chart(
+        "Peak-width distribution", peak_width_rows,
+        x_key="width", value_key="peak_count",
+        x_axis_label="Peak width (bp)", y_axis_label="Peaks",
     )
     peak_width += render_table(
         [("sample_id", "Sample"), ("width", "Peak width (bp)"),
          ("peak_count", "Peaks")],
         peak_width_rows, empty_message="No peak-width distribution data available",
         aria_label="Peak-width distribution table",
+        row_limit=2000,
     )
     profiles = {
         str(sample.get("sample_id", "")): {
@@ -1541,7 +1802,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Consolidated QC dashboard</title><style>
 body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1100px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
-.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}
+.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}.table-note{color:#475569;font-size:.9rem}
 </style></head><body><main><h1>Consolidated QC dashboard</h1><p>Descriptive technical and biological QC summary; no biological thresholds are applied.</p>""" + body + "</main></body></html>"
 
 
@@ -1556,7 +1817,7 @@ def write_outputs(data: Mapping[str, object], outdir: Path) -> None:
 
 
 def _validate_output_files(outdir: Path) -> None:
-    for name in ("qc_dashboard.html", "qc_summary.tsv", "qc_summary.json", "top_motifs.tsv", "tss_profiles.tsv"):
+    for name in DASHBOARD_OUTPUT_FILENAMES:
         if not (outdir / name).is_file() or (outdir / name).stat().st_size == 0:
             raise DashboardInputError(f"dashboard output {name} is empty")
 
@@ -1574,8 +1835,35 @@ def _remove_generated_path(path: Path) -> None:
         path.unlink()
 
 
+def _validate_publication_target(outdir: Path) -> None:
+    """Reject directory swaps that could remove files outside this bundle."""
+    resolved = outdir.resolve()
+    if resolved == Path.cwd().resolve() or resolved == Path(resolved.anchor):
+        raise DashboardInputError(
+            "dashboard output must be a dedicated dashboard output directory"
+        )
+    if outdir.is_symlink() or (outdir.exists() and not outdir.is_dir()):
+        raise DashboardInputError(
+            "dashboard output must be a dedicated dashboard output directory"
+        )
+    if not outdir.exists():
+        return
+    allowed = set(DASHBOARD_OUTPUT_FILENAMES)
+    unexpected = sorted(
+        child.name
+        for child in outdir.iterdir()
+        if child.name not in allowed or not child.is_file() or child.is_symlink()
+    )
+    if unexpected:
+        raise DashboardInputError(
+            "dashboard output must be a dedicated dashboard output directory; "
+            f"unexpected entry {unexpected[0]}"
+        )
+
+
 def write_outputs_atomically(data: Mapping[str, object], outdir: Path) -> None:
     """Publish the validated five-file bundle as one rollback-safe directory."""
+    _validate_publication_target(outdir)
     outdir.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{outdir.name}.tmp-", dir=outdir.parent))
     backup = Path(tempfile.mkdtemp(prefix=f".{outdir.name}.backup-", dir=outdir.parent))

@@ -22,6 +22,75 @@ GOLDEN_DEEPTOOLS_PROFILE = (
 import qc_dashboard as qc
 
 
+def library_metrics_tsv(sample_id, **overrides):
+    values = {
+        "raw_total_reads": 100,
+        "mapped_percent": 95,
+        "properly_paired_percent": 90,
+        "mapq_filtered_reads": 80,
+        "mapq_filtered_fragments": 40,
+        "mapq_filtered_fraction": 0.8,
+        "markdup_examined_reads": 100,
+        "duplicate_total": 10,
+        "duplicate_percent": 10,
+        "mitochondrial_percent": 2,
+        "estimated_library_size": 1000,
+        "insert_size_total_pairs": 1,
+        "insert_size_min": 147,
+        "insert_size_q25": 147,
+        "insert_size_mean": 147,
+        "insert_size_median": 147,
+        "insert_size_q75": 147,
+        "insert_size_max": 147,
+    }
+    values.update(overrides)
+    columns = ["sample_id", *values]
+    return (
+        "\t".join(columns) + "\n"
+        + "\t".join(
+            str(sample_id if column == "sample_id" else values[column])
+            for column in columns
+        )
+        + "\n"
+    )
+
+
+def peak_metrics_tsv(sample_id, **overrides):
+    values = {
+        "peak_count": 1,
+        "total_covered_bases": 321,
+        "peak_width_min": 321,
+        "peak_width_mean": 321,
+        "peak_width_median": 321,
+        "peak_width_max": 321,
+        "peak_width_q25": 321,
+        "peak_width_q75": 321,
+        "peak_score_count": 1,
+        "peak_score_min": 10,
+        "peak_score_q25": 10,
+        "peak_score_mean": 10,
+        "peak_score_median": 10,
+        "peak_score_q75": 10,
+        "peak_score_max": 10,
+        "signal_value_count": 1,
+        "signal_value_min": 5,
+        "signal_value_q25": 5,
+        "signal_value_mean": 5,
+        "signal_value_median": 5,
+        "signal_value_q75": 5,
+        "signal_value_max": 5,
+        "total_fragments": 4,
+        "fragments_in_peaks": 1,
+        "frip": 0.25,
+    }
+    values.update(overrides)
+    return (
+        "metric\tvalue\n"
+        f"sample_id\t{sample_id}\n"
+        + "".join(f"{metric}\t{value}\n" for metric, value in values.items())
+    )
+
+
 class MetadataAndTableParserTests(unittest.TestCase):
     def make_workspace(self):
         temporary_directory = tempfile.TemporaryDirectory()
@@ -137,7 +206,7 @@ class MetadataAndTableParserTests(unittest.TestCase):
             "ambiguous_reads": 5,
             "unassigned_reads": 15,
             "assigned_fraction": 0.01,
-            "assignment_counts": {"S1": 30, "S2": 50},
+            "assignment_counts": {"S1": 30, "S2": 50, "S_IgG": 0},
         }), encoding="utf-8")
 
         rows = qc.read_demultiplex_metrics([path], self.metadata())
@@ -182,7 +251,8 @@ class MetadataAndTableParserTests(unittest.TestCase):
             path = workspace / f"demultiplex-{index}.json"
             path.write_text(json.dumps({
                 "library_id": "L1", "total_reads": 1, "assigned_reads": 1,
-                "ambiguous_reads": 0, "unassigned_reads": 0, "assignment_counts": {"S1": 1},
+                "ambiguous_reads": 0, "unassigned_reads": 0,
+                "assignment_counts": {"S1": 1, "S2": 0, "S_IgG": 0},
             }), encoding="utf-8")
             paths.append(path)
 
@@ -214,14 +284,35 @@ class MetadataAndTableParserTests(unittest.TestCase):
             "assigned_reads": 80,
             "ambiguous_reads": 5,
             "unassigned_reads": 15,
-            "assignment_counts": {"S1": 30, "S2": 50},
+            "assignment_counts": {"S1": 30, "S2": 50, "S_IgG": 0},
             "observed_i2_counts": {"TATAGCCT": 30, "ATAGAGGC": 50},
         }), encoding="utf-8")
 
         rows = qc.read_demultiplex_metrics([path], self.metadata())
 
-        self.assertEqual(rows["L1"]["assignment_counts"], {"S1": 30, "S2": 50})
+        self.assertEqual(
+            rows["L1"]["assignment_counts"],
+            {"S1": 30, "S2": 50, "S_IgG": 0},
+        )
         self.assertEqual(rows["L1"]["assigned_fraction"], 0.8)
+
+    def test_read_demultiplex_metrics_requires_every_metadata_sample_allocation(self):
+        """A dropped zero-count sample key must not be reported as computed."""
+        workspace = self.make_workspace()
+        path = workspace / "demultiplex.metrics.json"
+        path.write_text(json.dumps({
+            "total_reads": 100,
+            "assigned_reads": 80,
+            "ambiguous_reads": 5,
+            "unassigned_reads": 15,
+            "assignment_counts": {"S1": 30, "S2": 50},
+        }), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "assignment_counts for L1 must exactly match metadata samples",
+        ):
+            qc.read_demultiplex_metrics([path], self.metadata())
 
     def test_read_demultiplex_metrics_rejects_ambiguous_unknown_or_inconsistent_counts(self):
         """Assignment identities and count totals must be safe before joining samples."""
@@ -275,10 +366,7 @@ class MetadataAndTableParserTests(unittest.TestCase):
         paths = []
         for index in range(2):
             path = workspace / f"library-{index}.tsv"
-            path.write_text(
-                "sample_id\traw_total_reads\tmapped_percent\nS1\t100\t95\n",
-                encoding="utf-8",
-            )
+            path.write_text(library_metrics_tsv("S1"), encoding="utf-8")
             paths.append(path)
 
         with self.assertRaisesRegex(qc.DashboardInputError, "duplicate sample_id S1"):
@@ -289,18 +377,42 @@ class MetadataAndTableParserTests(unittest.TestCase):
         workspace = self.make_workspace()
         valid = workspace / "S1.peak_qc.tsv"
         valid.write_text(
-            "metric\tvalue\nsample_id\tS1\npeak_count\t12\nfrip\t0.42\n",
+            peak_metrics_tsv("S1", peak_count=12, frip=0.42),
             encoding="utf-8",
         )
         self.assertEqual(qc.read_peak_metrics([valid])["S1"]["frip"], 0.42)
+        self.assertEqual(qc.read_peak_metrics([valid])["S1"]["width_min"], 321)
+        self.assertNotIn("peak_width_min", qc.read_peak_metrics([valid])["S1"])
 
         duplicate = workspace / "duplicate.peak_qc.tsv"
         duplicate.write_text(
-            "metric\tvalue\nsample_id\tS2\nfrip\t0.42\nfrip\t0.43\n",
+            peak_metrics_tsv("S2") + "frip\t0.43\n",
             encoding="utf-8",
         )
         with self.assertRaisesRegex(qc.DashboardInputError, "duplicate peak metric frip"):
             qc.read_peak_metrics([duplicate])
+
+    def test_library_and_peak_parsers_reject_incomplete_producer_schemas(self):
+        """A present but structurally empty artifact must not become computed QC."""
+        workspace = self.make_workspace()
+        library = workspace / "S1.library_qc.tsv"
+        library.write_text("sample_id\nS1\n", encoding="utf-8")
+        peak = workspace / "S1.peak_qc.tsv"
+        peak.write_text(
+            "metric\tvalue\nsample_id\tS1\npeak_count\t1\nfrip\t0.25\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "library metrics columns must exactly match the producer schema",
+        ):
+            qc.read_library_metrics([library])
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "peak metrics are missing required producer fields",
+        ):
+            qc.read_peak_metrics([peak])
 
     def test_distribution_parsers_consume_real_producer_tables_and_preserve_empty_samples(self):
         """Dropping either staged distribution would remove approved report data."""
@@ -1030,6 +1142,22 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertIn("0.001", dashboard)
         self.assertIn("computed", dashboard)
 
+    def test_run_overview_retains_library_group_control_and_motif_metadata(self):
+        """The overview must show the matched-control context needed to compare samples."""
+        dashboard = qc.render_dashboard(self.report_data())
+        overview = re.search(
+            r'aria-label="Run overview table".*?</table>',
+            dashboard,
+            re.DOTALL,
+        )
+
+        self.assertIsNotNone(overview)
+        for text in (
+            "Physical library", "Input group", "Matched control",
+            "Expected motif", "A_IGG", "CTCF &amp; &lt;target&gt;",
+        ):
+            self.assertIn(text, overview.group())
+
     def test_dashboard_tables_are_scrollable_without_page_width_overflow(self):
         """Narrow viewports need per-table scrolling instead of a clipped page."""
         html = qc.render_dashboard(self.report_data())
@@ -1092,6 +1220,7 @@ class DashboardOutputTests(unittest.TestCase):
         viewbox = re.search(r'viewBox="0 0 ([0-9.]+) ([0-9.]+)"', chart)
         self.assertIsNotNone(viewbox)
         self.assertGreater(float(viewbox.group(1)), 640)
+        self.assertGreater(float(viewbox.group(2)), 400)
         bars = [
             (float(x), float(width))
             for x, width in re.findall(
@@ -1151,6 +1280,39 @@ class DashboardOutputTests(unittest.TestCase):
             {label for _, label in legend_pairs},
             {f"long_target_sample_{index:02d}" for index in range(12)},
         )
+        self.assertEqual(chart.count('class="series-swatch"'), 12)
+
+    def test_distribution_chart_uses_a_fixed_numeric_axis_for_large_histograms(self):
+        """Distribution geometry must scale by series, not by every sample-bin pair."""
+        rows = [
+            {
+                "sample_id": f"sample_{sample_index:03d}",
+                "is_control": sample_index % 10 == 0,
+                "insert_size": bin_index,
+                "pair_count": (sample_index + bin_index) % 101,
+            }
+            for sample_index in range(100)
+            for bin_index in range(1, 501)
+        ]
+
+        chart = qc.render_distribution_chart(
+            "Insert-size distribution",
+            rows,
+            x_key="insert_size",
+            value_key="pair_count",
+            x_axis_label="Insert size (bp)",
+            y_axis_label="Read pairs",
+        )
+
+        self.assertIn('viewBox="0 0 640 280"', chart)
+        traces = re.findall(
+            r'<polyline[^>]*data-series-key="([^"]+)"',
+            chart,
+        )
+        self.assertEqual(len(traces), 100)
+        self.assertEqual(len(set(traces)), 100)
+        self.assertEqual(chart.count('class="series-swatch"'), 100)
+        self.assertLess(len(chart), 2_000_000)
 
     def test_cli_publishes_a_complete_output_set_and_reports_input_errors(self):
         """A partial report must never be published after a bad command invocation."""
@@ -1177,10 +1339,10 @@ class DashboardOutputTests(unittest.TestCase):
             "unassigned_reads": 0, "assignment_counts": {"I1": 1, "S1": 3},
         }), encoding="utf-8")
         (directories["library"] / "S1.library_qc.tsv").write_text(
-            "sample_id\tmapped_percent\nS1\t95\n", encoding="utf-8"
+            library_metrics_tsv("S1", mapped_percent=95), encoding="utf-8"
         )
         (directories["library"] / "I1.library_qc.tsv").write_text(
-            "sample_id\tmapped_percent\nI1\t90\n", encoding="utf-8"
+            library_metrics_tsv("I1", mapped_percent=90), encoding="utf-8"
         )
         for sample_id, insert_size, pair_count in (("S1", 147, 3), ("I1", 121, 1)):
             (directories["insert"] / f"{sample_id}.insert_size_distribution.tsv").write_text(
@@ -1198,13 +1360,7 @@ class DashboardOutputTests(unittest.TestCase):
                 encoding="utf-8",
             )
         (directories["peak"] / "S1.peak_qc.tsv").write_text(
-            "metric\tvalue\n"
-            "sample_id\tS1\n"
-            "peak_count\t1\n"
-            "total_covered_bases\t321\n"
-            "total_fragments\t4\n"
-            "fragments_in_peaks\t1\n"
-            "frip\t0.25\n",
+            peak_metrics_tsv("S1"),
             encoding="utf-8",
         )
         (directories["peak"] / "S1.peak_qc.width_histogram.tsv").write_text(
@@ -1291,6 +1447,37 @@ class DashboardOutputTests(unittest.TestCase):
                     list(workspace.glob(f".{outdir.name}.*")),
                     [],
                 )
+
+    def test_atomic_bundle_refuses_to_replace_a_nondedicated_directory(self):
+        """Directory publication must never delete an unrelated caller-owned file."""
+        workspace = self.make_workspace()
+        outdir = workspace / "shared"
+        outdir.mkdir()
+        sentinel = outdir / "keep-me.txt"
+        sentinel.write_bytes(b"caller-owned\n")
+        data = {
+            "schema_version": 1,
+            "annotation_status": "skipped_no_annotation",
+            "samples": [],
+            "warnings": [],
+        }
+
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "dedicated dashboard output directory",
+        ):
+            qc.write_outputs_atomically(data, outdir)
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "dedicated dashboard output directory",
+        ):
+            qc.write_outputs_atomically(data, Path.cwd())
+
+        self.assertEqual(
+            {path.name: path.read_bytes() for path in outdir.iterdir()},
+            {"keep-me.txt": b"caller-owned\n"},
+        )
+        self.assertEqual(list(workspace.glob(".shared.*")), [])
 
 
 if __name__ == "__main__":
