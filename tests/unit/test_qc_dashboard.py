@@ -1064,6 +1064,8 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertNotIn('class="qc-fail"', html)
         for visible_text in (
             "NA", "Targets (solid)", "IgG controls (outlined)",
+            "Bar charts — Targets (solid)",
+            "Line charts use the per-series swatches",
             "CTCF &amp; &lt;target&gt;", "M01 &amp; &lt;motif&gt;",
             "NA warning &amp; &lt;visible&gt;",
         ):
@@ -1312,7 +1314,27 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertEqual(len(traces), 100)
         self.assertEqual(len(set(traces)), 100)
         self.assertEqual(chart.count('class="series-swatch"'), 100)
+        self.assertEqual(chart.count('class="axis-tick-label"'), 6)
         self.assertLess(len(chart), 2_000_000)
+
+    def test_distribution_chart_centers_a_single_bin_with_one_x_tick(self):
+        """A degenerate numeric range must not stack labels at the left edge."""
+        chart = qc.render_distribution_chart(
+            "Single-bin distribution",
+            [{
+                "sample_id": "sample_001",
+                "is_control": False,
+                "insert_size": 150,
+                "pair_count": 12,
+            }],
+            x_key="insert_size",
+            value_key="pair_count",
+            x_axis_label="Insert size (bp)",
+            y_axis_label="Read pairs",
+        )
+
+        self.assertEqual(chart.count('class="axis-tick-label"'), 4)
+        self.assertRegex(chart, r'<polyline[^>]*points="338\.0,[0-9.]+?"')
 
     def test_cli_publishes_a_complete_output_set_and_reports_input_errors(self):
         """A partial report must never be published after a bad command invocation."""

@@ -1472,9 +1472,38 @@ def render_distribution_chart(
     x_min = min(point[0] for point in all_points)
     x_max = max(point[0] for point in all_points)
     y_max = max(point[1] for point in all_points) or 1.0
-    x_span = x_max - x_min or 1.0
+    x_span = x_max - x_min
     width, height, left, right, plot_bottom = 640, 280, 60, 24, 234
+    plot_width = width - left - right
     plot_height = plot_bottom - 32
+    def x_position(value: float) -> float:
+        if x_span == 0:
+            return left + plot_width / 2.0
+        return left + (value - x_min) / x_span * plot_width
+
+    axis_ticks = []
+    x_tick_values = (
+        (x_min,) if x_span == 0
+        else (x_min, (x_min + x_max) / 2.0, x_max)
+    )
+    for value in x_tick_values:
+        tick_x = x_position(value)
+        axis_ticks.append(
+            f'<line x1="{tick_x:.1f}" y1="{plot_bottom}" '
+            f'x2="{tick_x:.1f}" y2="{plot_bottom + 5}" class="axis"/>'
+            f'<text x="{tick_x:.1f}" y="{plot_bottom + 17}" '
+            f'text-anchor="middle" class="axis-tick-label">'
+            f'{html.escape(format_value(value))}</text>'
+        )
+    for value in (0.0, y_max / 2.0, y_max):
+        y_position = plot_bottom - value / y_max * plot_height
+        axis_ticks.append(
+            f'<line x1="{left - 5}" y1="{y_position:.1f}" '
+            f'x2="{left}" y2="{y_position:.1f}" class="axis"/>'
+            f'<text x="{left - 8}" y="{y_position + 4:.1f}" '
+            f'text-anchor="end" class="axis-tick-label">'
+            f'{html.escape(format_value(value))}</text>'
+        )
     traces = []
     legend = []
     for index, (sample_id, (is_control, raw_profile)) in enumerate(
@@ -1483,7 +1512,7 @@ def render_distribution_chart(
         profile = _downsample_profile(raw_profile)
         plotted = [
             (
-                left + (x_value - x_min) / x_span * (width - left - right),
+                x_position(x_value),
                 plot_bottom - y_value / y_max * plot_height,
             )
             for x_value, y_value in profile
@@ -1519,7 +1548,7 @@ def render_distribution_chart(
         f'{html.escape(x_axis_label)}</text>'
         f'<line x1="{left}" y1="{plot_bottom}" x2="{width - right}" '
         f'y2="{plot_bottom}" class="axis"/>'
-        + "".join(traces) + '</svg><ol class="series-legend">'
+        + "".join(axis_ticks) + "".join(traces) + '</svg><ol class="series-legend">'
         + "".join(legend) + "</ol></div>"
     )
 
@@ -1788,7 +1817,8 @@ def render_dashboard(data: Mapping[str, object]) -> str:
     body = "".join((
         _section("run-overview", "Run overview", counts + overview),
         _section("input-availability", "Input-family availability", availability),
-        '<p class="legend">Targets (solid); IgG controls (outlined) and hatched.</p>',
+        '<p class="legend">Bar charts — Targets (solid); IgG controls (outlined) '
+        'and hatched. Line charts use the per-series swatches.</p>',
         _section("demultiplexing", "Demultiplexing", demux),
         _section("alignment", "Alignment and library QC", alignment),
         _section("insert-size-distribution", "Insert-size distribution", insert),
