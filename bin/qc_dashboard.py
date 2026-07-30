@@ -578,8 +578,6 @@ def _top_motif_rows(data: Mapping[str, object]) -> list[dict[str, object]]:
         ordered = sorted(
             (motif for motif in motifs if isinstance(motif, Mapping)),
             key=lambda motif: (
-                float(motif.get("adjusted_p_value", math.inf))
-                if motif.get("adjusted_p_value") is not None else math.inf,
                 float(motif.get("rank", math.inf)) if motif.get("rank") is not None else math.inf,
                 str(motif.get("motif_id", "")),
             ),
@@ -687,34 +685,46 @@ def render_bar_chart(
     )
 
 
-def render_line_chart(title: str, profiles: Mapping[str, Sequence[tuple[int, object]]]) -> str:
+def render_line_chart(title: str, profiles: Mapping[str, object]) -> str:
     """Render escaped profile labels and SVG title tooltips for TSS traces."""
-    points = [
-        (str(sample_id), int(position), float(signal))
-        for sample_id, profile in profiles.items()
-        for position, signal in profile
-        if math.isfinite(float(signal))
-    ]
+    points: list[tuple[str, int, float, bool]] = []
+    for sample_id, entry in profiles.items():
+        if isinstance(entry, Mapping):
+            profile = entry.get("profile", [])
+            is_control = bool(entry.get("is_control"))
+        else:
+            profile = entry
+            is_control = False
+        if not isinstance(profile, Sequence) or isinstance(profile, (str, bytes)):
+            continue
+        for position, signal in profile:
+            numeric_signal = float(signal)
+            if math.isfinite(numeric_signal):
+                points.append((str(sample_id), int(position), numeric_signal, is_control))
     if not points:
         return f'<p class="empty">{html.escape("No TSS profile data available")}</p>'
     width, height, left, bottom = 640, 260, 60, 46
     x_min, x_max = min(point[1] for point in points), max(point[1] for point in points)
     y_max = max(point[2] for point in points) or 1.0
     x_span = x_max - x_min or 1
-    grouped: dict[str, list[tuple[int, float]]] = {}
-    for sample_id, position, signal in points:
-        grouped.setdefault(sample_id, []).append((position, signal))
+    grouped: dict[str, tuple[bool, list[tuple[int, float]]]] = {}
+    for sample_id, position, signal, is_control in points:
+        if sample_id not in grouped:
+            grouped[sample_id] = (is_control, [])
+        grouped[sample_id][1].append((position, signal))
     palette = ("#2563eb", "#7c3aed", "#0f766e", "#c2410c", "#be123c")
     paths = []
-    for index, (sample_id, profile) in enumerate(sorted(grouped.items())):
+    for index, (sample_id, (is_control, profile)) in enumerate(sorted(grouped.items())):
         coordinates = " ".join(
             f"{left + (position - x_min) / x_span * (width - left - 24):.1f},{height - bottom - signal / y_max * (height - bottom - 32):.1f}"
             for position, signal in sorted(profile)
         )
         color = palette[index % len(palette)]
-        tooltip = f"{sample_id}: TSS profile"
+        kind = "control" if is_control else "target"
+        tooltip = f"{sample_id}: TSS profile ({kind})"
+        dash = ' stroke-dasharray="6 4"' if is_control else ""
         paths.append(
-            f'<polyline points="{coordinates}" fill="none" stroke="{color}" stroke-width="2">'
+            f'<polyline data-sample-kind="{kind}" points="{coordinates}" fill="none" stroke="{color}" stroke-width="2"{dash}>'
             f'<title>{html.escape(tooltip)}</title></polyline>'
             f'<text x="{width - 18}" y="{36 + index * 16}" text-anchor="end" fill="{color}">{html.escape(sample_id)}</text>'
         )
@@ -761,14 +771,13 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         peak_rows, empty_message="No target peak metrics available",
     )
     profiles = {
-        str(sample.get("sample_id", "")): _nested(sample, "tss").get("profile", [])
+        str(sample.get("sample_id", "")): {
+            "profile": _nested(sample, "tss").get("profile", []),
+            "is_control": sample.get("is_control"),
+        }
         for sample in samples if isinstance(_nested(sample, "tss").get("profile"), Sequence)
     }
-    safe_profiles = {
-        sample_id: profile for sample_id, profile in profiles.items()
-        if not isinstance(profile, (str, bytes))
-    }
-    tss = render_line_chart("TSS profiles", safe_profiles)
+    tss = render_line_chart("TSS profiles", profiles)
     tss += render_table(
         [("sample_id", "Sample"), ("tss_status", "Status"), ("tss_enrichment", "TSS enrichment")],
         summary_rows, empty_message="No TSS metrics available",

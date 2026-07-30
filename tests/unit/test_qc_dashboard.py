@@ -2,6 +2,7 @@ import csv
 import contextlib
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -549,14 +550,23 @@ class DashboardOutputTests(unittest.TestCase):
     def test_tidy_exports_exclude_controls_limit_motifs_and_order_rows(self):
         """Controls must not leak into motif biology and sortable exports stay stable."""
         workspace = self.make_workspace()
+        data = self.report_data()
+        data["samples_by_id"]["Z_TARGET"]["top_motifs"] = [
+            {"motif_id": "RANK_2_LOW_P", "adjusted_p_value": 0.000001, "rank": 2},
+            {"motif_id": "B_RANK_1", "adjusted_p_value": 0.9, "rank": 1},
+            {"motif_id": "A_RANK_1", "adjusted_p_value": 0.8, "rank": 1},
+        ]
 
-        qc.write_outputs(self.report_data(), workspace)
+        qc.write_outputs(data, workspace)
 
         with (workspace / "top_motifs.tsv").open(encoding="utf-8", newline="") as handle:
             motif_rows = list(csv.DictReader(handle, delimiter="\t"))
-        self.assertEqual(len(motif_rows), 10)
+        self.assertEqual(len(motif_rows), 3)
         self.assertEqual({row["sample_id"] for row in motif_rows}, {"Z_TARGET"})
-        self.assertEqual([int(row["rank"]) for row in motif_rows], list(range(1, 11)))
+        self.assertEqual(
+            [row["motif_id"] for row in motif_rows],
+            ["A_RANK_1", "B_RANK_1", "RANK_2_LOW_P"],
+        )
         with (workspace / "tss_profiles.tsv").open(encoding="utf-8", newline="") as handle:
             profile_rows = list(csv.DictReader(handle, delimiter="\t"))
         self.assertEqual(list(profile_rows[0]), ["sample_id", "position_bp", "signal"])
@@ -589,6 +599,12 @@ class DashboardOutputTests(unittest.TestCase):
             self.assertIn(visible_text, html)
         self.assertNotIn("CTCF & <target>", html)
         self.assertNotIn("M01 & <motif>", html)
+        control_trace = re.search(r'<polyline[^>]*data-sample-kind="control"[^>]*>', html)
+        target_trace = re.search(r'<polyline[^>]*data-sample-kind="target"[^>]*>', html)
+        self.assertIsNotNone(control_trace)
+        self.assertIsNotNone(target_trace)
+        self.assertIn('stroke-dasharray="6 4"', control_trace.group())
+        self.assertNotIn("stroke-dasharray", target_trace.group())
 
     def test_cli_publishes_a_complete_output_set_and_reports_input_errors(self):
         """A partial report must never be published after a bad command invocation."""
