@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import html
 import json
@@ -519,6 +520,44 @@ def read_peak_width_distributions(
     return dict(sorted(records.items()))
 
 
+def read_fragments_per_peak_distributions(
+    paths: Sequence[Path],
+) -> dict[str, list[dict[str, int]]]:
+    """Compact strict per-peak producer rows into sample-keyed histograms."""
+    records: dict[str, list[dict[str, int]]] = {}
+    suffix = ".peak_qc.fragments_per_peak.tsv"
+    expected_fields = [
+        "chrom", "start", "end", "peak_name", "width", "score",
+        "signal_value", "fragment_count",
+    ]
+    for path in paths:
+        sample_id = _sample_id_from_filename(
+            path, suffix, label="fragments-per-peak distribution"
+        )
+        if sample_id in records:
+            raise DashboardInputError(
+                f"duplicate fragments-per-peak distribution sample_id {sample_id}"
+            )
+        headers, rows = _read_tsv(path, label="fragments-per-peak distribution")
+        if headers != expected_fields:
+            raise DashboardInputError(
+                f"{path}: fragments-per-peak distribution columns must exactly "
+                "match the producer schema"
+            )
+        counts = Counter(
+            _nonnegative_integer(
+                row["fragment_count"],
+                label=f"{path}:{row_number} fragment_count",
+            )
+            for row_number, row in enumerate(rows, start=2)
+        )
+        records[sample_id] = [
+            {"fragment_count": fragment_count, "peak_count": counts[fragment_count]}
+            for fragment_count in sorted(counts)
+        ]
+    return dict(sorted(records.items()))
+
+
 def read_tss_profile(
     path: Path, *, before_bp: int = TSS_BEFORE_BP, bin_size: int = TSS_BIN_SIZE
 ) -> list[tuple[int, float | None]]:
@@ -668,7 +707,11 @@ def _empty_sample(record: Mapping[str, object]) -> dict[str, object]:
         "sample_kind": "control" if record["is_control"] else "target",
         "demultiplex": {field: None for field in DEMULTIPLEX_FIELDS},
         "library": {"insert_size_distribution": None},
-        "peak": {"frip": None, "width_distribution": None},
+        "peak": {
+            "frip": None,
+            "width_distribution": None,
+            "fragments_per_peak_distribution": None,
+        },
         "tss": {
             "status": None, "enrichment": None, "profile": None,
             "score_status": None,
@@ -762,6 +805,9 @@ def build_report_data(
     *,
     insert_sizes: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     peak_widths: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
+    fragments_per_peak: (
+        Mapping[str, Sequence[Mapping[str, object]]] | None
+    ) = None,
     motif_analysis_status: str = "auto",
 ) -> dict[str, object]:
     """Initialize optional QC families, then overlay validated sample metrics."""
@@ -779,12 +825,14 @@ def build_report_data(
         )
     insert_sizes = {} if insert_sizes is None else insert_sizes
     peak_widths = {} if peak_widths is None else peak_widths
+    fragments_per_peak = {} if fragments_per_peak is None else fragments_per_peak
     samples_by_id = {sample_id: _empty_sample(record) for sample_id, record in metadata.items()}
     sample_ids = set(samples_by_id)
     for family_name, family in (("library", libraries), ("peak", peaks), ("tss", tss),
                                 ("motif", motifs), ("top motifs", top_motifs),
                                 ("insert-size", insert_sizes),
-                                ("peak-width", peak_widths)):
+                                ("peak-width", peak_widths),
+                                ("fragments-per-peak", fragments_per_peak)):
         unknown = sorted(set(family) - sample_ids)
         if unknown:
             raise DashboardInputError(f"{family_name} metrics reference unknown sample_id {unknown[0]}")
@@ -900,6 +948,10 @@ def build_report_data(
                     sample, "peak_width", "missing",
                     f"{sample_id}: missing peak-width distribution",
                 )
+            if sample_id in fragments_per_peak:
+                sample["peak"]["fragments_per_peak_distribution"] = [
+                    dict(row) for row in fragments_per_peak[sample_id]
+                ]
 
         if annotation_status == "skipped_no_annotation":
             sample["tss"]["status"] = "skipped_no_annotation"
@@ -1133,6 +1185,9 @@ def _public_sample(sample: Mapping[str, object]) -> dict[str, object]:
         if isinstance(insert_distribution, list) else None
     )
     width_distribution = peak.get("width_distribution")
+    fragments_per_peak_distribution = peak.get(
+        "fragments_per_peak_distribution"
+    )
     public_peak = _project(peak, PEAK_FIELDS)
     public_peak["width_distribution"] = (
         [
@@ -1141,6 +1196,17 @@ def _public_sample(sample: Mapping[str, object]) -> dict[str, object]:
             if isinstance(row, Mapping)
         ]
         if isinstance(width_distribution, list) else None
+    )
+    public_peak["fragments_per_peak_distribution"] = (
+        [
+            {
+                "fragment_count": row.get("fragment_count"),
+                "peak_count": row.get("peak_count"),
+            }
+            for row in fragments_per_peak_distribution
+            if isinstance(row, Mapping)
+        ]
+        if isinstance(fragments_per_peak_distribution, list) else None
     )
     top_motifs = sample.get("top_motifs", [])
     warnings = sample.get("warnings", [])
@@ -2076,6 +2142,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.peak_dir, "*.peak_qc.width_histogram.tsv", label="peak"
             )
         )
+        fragments_per_peak = read_fragments_per_peak_distributions(
+            _input_paths(
+                args.peak_dir,
+                "*.peak_qc.fragments_per_peak.tsv",
+                label="peak",
+            )
+        )
         tss = _read_tss_metrics(args.tss_dir)
         motifs = _read_motif_metrics(
             _input_paths(args.motif_dir, "*.motif_qc.tsv", label="motif")
@@ -2086,6 +2159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             annotation_status=args.annotation_status,
             insert_sizes=insert_sizes,
             peak_widths=peak_widths,
+            fragments_per_peak=fragments_per_peak,
             motif_analysis_status=args.motif_analysis_status,
         )
         write_outputs_atomically(data, args.outdir)

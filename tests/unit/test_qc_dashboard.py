@@ -460,6 +460,83 @@ class MetadataAndTableParserTests(unittest.TestCase):
             },
         )
 
+    def test_fragments_per_peak_parser_compacts_real_producer_rows(self):
+        """Raw per-peak identities must collapse to a small count histogram."""
+        workspace = self.make_workspace()
+        path = workspace / "S1.peak_qc.fragments_per_peak.tsv"
+        path.write_text(
+            "chrom\tstart\tend\tpeak_name\twidth\tscore\tsignal_value\tfragment_count\n"
+            "chr1\t0\t250\tp1\t250\t10\t3.5\t0\n"
+            "chr1\t500\t1000\tp2\t500\t12\t5.0\t4\n"
+            "chr2\t0\t750\tp3\t750\t8\t2.0\t4\n",
+            encoding="utf-8",
+        )
+        empty_path = workspace / "S2.peak_qc.fragments_per_peak.tsv"
+        empty_path.write_text(
+            "chrom\tstart\tend\tpeak_name\twidth\tscore\t"
+            "signal_value\tfragment_count\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            qc.read_fragments_per_peak_distributions([path, empty_path]),
+            {
+                "S1": [
+                    {"fragment_count": 0, "peak_count": 1},
+                    {"fragment_count": 4, "peak_count": 2},
+                ],
+                "S2": [],
+            },
+        )
+
+    def test_fragments_per_peak_parser_rejects_ambiguous_or_invalid_inputs(self):
+        """Malformed producer data must not be silently joined to a target."""
+        workspace = self.make_workspace()
+        header = (
+            "chrom\tstart\tend\tpeak_name\twidth\tscore\t"
+            "signal_value\tfragment_count\n"
+        )
+        cases = (
+            (
+                "wrong-header.peak_qc.fragments_per_peak.tsv",
+                "chrom\tstart\tend\tpeak_name\tfragment_count\n",
+                "columns must exactly match the producer schema",
+            ),
+            (
+                "negative.peak_qc.fragments_per_peak.tsv",
+                header + "chr1\t0\t1\tp1\t1\t1\t1\t-1\n",
+                "finite and >= 0",
+            ),
+            (
+                "fractional.peak_qc.fragments_per_peak.tsv",
+                header + "chr1\t0\t1\tp1\t1\t1\t1\t1.5\n",
+                "must be an integer",
+            ),
+            (
+                "wrong.tsv",
+                header,
+                "unexpected fragments-per-peak distribution filename",
+            ),
+        )
+        for filename, contents, expression in cases:
+            with self.subTest(filename=filename):
+                path = workspace / filename
+                path.write_text(contents, encoding="utf-8")
+                with self.assertRaisesRegex(qc.DashboardInputError, expression):
+                    qc.read_fragments_per_peak_distributions([path])
+
+        duplicate_a = workspace / "first" / "S1.peak_qc.fragments_per_peak.tsv"
+        duplicate_b = workspace / "second" / "S1.peak_qc.fragments_per_peak.tsv"
+        duplicate_a.parent.mkdir()
+        duplicate_b.parent.mkdir()
+        duplicate_a.write_text(header, encoding="utf-8")
+        duplicate_b.write_text(header, encoding="utf-8")
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "duplicate fragments-per-peak distribution sample_id S1",
+        ):
+            qc.read_fragments_per_peak_distributions([duplicate_a, duplicate_b])
+
     def test_distribution_parsers_reject_filename_and_row_identity_mismatch(self):
         """A row must never be attached to the sample encoded by another file."""
         workspace = self.make_workspace()
@@ -727,6 +804,12 @@ class ReportDataTests(unittest.TestCase):
                 metadata, {}, {"S2": {"sample_id": "S2"}}, {}, {}, {}, {},
                 annotation_status="skipped_no_annotation",
             )
+        with self.assertRaisesRegex(qc.DashboardInputError, "unknown sample_id S2"):
+            qc.build_report_data(
+                metadata, {}, {}, {}, {}, {}, {},
+                annotation_status="skipped_no_annotation",
+                fragments_per_peak={"S2": []},
+            )
 
     def test_build_report_data_models_intentional_skips_without_generic_missing_status(self):
         """Disabled optional analyses retain a skipped reason instead of looking lost."""
@@ -915,6 +998,14 @@ class DashboardOutputTests(unittest.TestCase):
             peak_widths={
                 "Z_TARGET": [{"width": 200, "peak_count": 2}],
             },
+            fragments_per_peak={
+                "Z_TARGET": [
+                    {
+                        "fragment_count": 4, "peak_count": 2,
+                        "chrom": "chr1", "peak_name": "must-not-export",
+                    },
+                ],
+            },
             motif_analysis_status="computed",
         )
         data["samples_by_id"]["Z_TARGET"]["warnings"].append(
@@ -982,6 +1073,9 @@ class DashboardOutputTests(unittest.TestCase):
             },
         )
         self.assertIsNone(payload["samples"][0]["peak"]["frip"])
+        self.assertIsNone(
+            payload["samples"][0]["peak"]["fragments_per_peak_distribution"]
+        )
         self.assertEqual(
             payload["metric_definitions"]["tss_enrichment"]["formula"],
             "center_bin_signal / mean(terminal_100bp_flanks)",
@@ -1027,6 +1121,18 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertEqual(
             target["peak"]["width_distribution"],
             [{"width": 321, "peak_count": 7}],
+        )
+        self.assertEqual(
+            target["peak"]["fragments_per_peak_distribution"],
+            [{"fragment_count": 4, "peak_count": 2}],
+        )
+        self.assertNotIn(
+            "chrom",
+            target["peak"]["fragments_per_peak_distribution"][0],
+        )
+        self.assertNotIn(
+            "peak_name",
+            target["peak"]["fragments_per_peak_distribution"][0],
         )
         dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
         self.assertIn("Insert-size distribution", dashboard)

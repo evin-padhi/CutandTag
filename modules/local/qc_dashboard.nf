@@ -22,6 +22,8 @@ process QC_DASHBOARD {
         stageAs: 'dashboard_inputs/peak/metrics??/*'
     path peak_width_histograms,
         stageAs: 'dashboard_inputs/peak/widths??/*'
+    path peak_fragment_counts,
+        stageAs: 'dashboard_inputs/peak/fragments??/*'
     path tss_profile_data,
         stageAs: 'dashboard_inputs/tss/profiles??/*'
     path tss_statuses,
@@ -154,6 +156,36 @@ def staged_tables(root, prefix, filename, label):
     return [by_ordinal[ordinal] for ordinal in ordinals]
 
 
+def staged_suffix_tables(root, prefix, suffix, label):
+    # Preserve filename identity while validating one file per stage ordinal.
+    by_ordinal = {}
+    pattern = re.compile(rf"{re.escape(prefix)}([0-9]+)")
+    for staged in root.iterdir():
+        if not staged.name.startswith(prefix):
+            continue
+        match = pattern.fullmatch(staged.name)
+        if match is None or not staged.is_dir():
+            raise SystemExit(f"unexpected staged {label} path: {staged}")
+        ordinal = int(match.group(1))
+        if ordinal in by_ordinal:
+            raise SystemExit(f"duplicate staged {label} ordinal {ordinal}")
+        candidates = sorted(
+            entry for entry in staged.iterdir()
+            if entry.is_file() and entry.name.endswith(suffix)
+        )
+        if len(candidates) != 1:
+            raise SystemExit(
+                f"{staged}: staged {label} must contain exactly one *{suffix}"
+            )
+        by_ordinal[ordinal] = candidates[0]
+    ordinals = sorted(by_ordinal)
+    if ordinals != list(range(1, len(ordinals) + 1)):
+        raise SystemExit(
+            f"staged {label} ordinals must be contiguous from 1"
+        )
+    return [by_ordinal[ordinal] for ordinal in ordinals]
+
+
 ame_tables = staged_tables(
     Path("dashboard_inputs/ame"), "results", "ame.tsv", "AME result"
 )
@@ -163,6 +195,20 @@ status_tables = staged_tables(
     "ame_status.tsv",
     "AME status",
 )
+fragment_suffix = ".peak_qc.fragments_per_peak.tsv"
+fragment_tables = staged_suffix_tables(
+    Path("dashboard_inputs/peak"),
+    "fragments",
+    fragment_suffix,
+    "fragments-per-peak",
+)
+fragment_sample_ids = sorted(
+    path.name[:-len(fragment_suffix)] for path in fragment_tables
+)
+if fragment_sample_ids != target_ids:
+    raise SystemExit(
+        "fragments-per-peak sample_ids do not match target metadata"
+    )
 if len(ame_tables) != len(result_sample_ids):
     raise SystemExit(
         f"AME result count {len(ame_tables)} does not match "
