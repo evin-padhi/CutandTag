@@ -83,6 +83,136 @@ class EndpointLabelPackingTests(unittest.TestCase):
             )
 
 
+class DistributionRenderingTests(unittest.TestCase):
+    def metadata(self):
+        return {
+            "S1": {
+                "assay_target": "CTCF",
+                "is_control": False,
+            },
+            "S2": {
+                "assay_target": "CTCF",
+                "is_control": False,
+            },
+            "I1": {
+                "assay_target": "IgG",
+                "is_control": True,
+            },
+        }
+
+    def test_binned_distribution_uses_midpoints_percent_and_target_styles(self):
+        panel = visuals.render_binned_distribution(
+            "Insert-size distribution",
+            {
+                "S1": [
+                    {"bin_start": 0, "bin_end": 250, "count": 3, "percent": 75.0},
+                    {"bin_start": 250, "bin_end": 500, "count": 1, "percent": 25.0},
+                ],
+                "S2": [
+                    {"bin_start": 0, "bin_end": 250, "count": 1, "percent": 25.0},
+                    {"bin_start": 250, "bin_end": 500, "count": 3, "percent": 75.0},
+                ],
+            },
+            self.metadata(),
+            x_axis_label="Insert size (bp)",
+        )
+
+        self.assertRegex(
+            panel,
+            r'class="axis-title axis-title-y"[^>]*>Percent of read pairs</text>',
+        )
+        self.assertIn('data-bin-midpoint="125"', panel)
+        self.assertIn('data-bin-midpoint="375"', panel)
+        last_midpoint = re.search(
+            r'data-bin-midpoint="375"[^>]*(?:cx|x)="([0-9.]+)"',
+            panel,
+        )
+        self.assertIsNotNone(last_midpoint)
+        self.assertLess(float(last_midpoint.group(1)), 535.0)
+        self.assertEqual(panel.count('data-assay-target="CTCF"'), 2)
+        self.assertEqual(
+            len(re.findall(r'class="distribution-trace"[^>]*stroke="#2F78D1"', panel)),
+            2,
+        )
+        dashes = re.findall(
+            r'data-sample-id="S[12]"[^>]*stroke-dasharray="([^"]+)"',
+            panel,
+        )
+        self.assertEqual(len(set(dashes)), 2)
+        self.assertEqual(panel.count('class="endpoint-label"'), 2)
+        self.assertIn("<title>S1: [0, 250) bp; 75%; count 3</title>", panel)
+
+    def test_endpoint_labels_are_packed_inside_plot_and_get_leaders(self):
+        panel = visuals.render_binned_distribution(
+            "Peak-width distribution",
+            {
+                sample_id: [
+                    {"bin_start": 0, "bin_end": 250, "count": 1, "percent": 50.0},
+                    {"bin_start": 250, "bin_end": 500, "count": 1, "percent": 50.0},
+                ]
+                for sample_id in ("S1", "S2", "I1")
+            },
+            self.metadata(),
+            x_axis_label="Peak width (bp)",
+        )
+
+        positions = [
+            float(value)
+            for value in re.findall(r'class="endpoint-label"[^>]* y="([0-9.]+)"', panel)
+        ]
+        self.assertEqual(len(positions), 3)
+        self.assertTrue(all(36.0 <= value <= 236.0 for value in positions))
+        self.assertGreaterEqual(
+            min(b - a for a, b in zip(sorted(positions), sorted(positions)[1:])),
+            13.0,
+        )
+        self.assertIn('class="endpoint-leader"', panel)
+
+    def test_fragments_per_peak_ecdf_has_separate_zero_and_log_ticks(self):
+        panel = visuals.render_ecdf(
+            "Fragments per peak",
+            {
+                "S1": [
+                    {"value": 0, "count": 2, "cumulative_percent": 40.0},
+                    {"value": 1, "count": 1, "cumulative_percent": 60.0},
+                    {"value": 10, "count": 1, "cumulative_percent": 80.0},
+                    {"value": 100, "count": 1, "cumulative_percent": 100.0},
+                ],
+            },
+            self.metadata(),
+            x_axis_label="Fragments per peak",
+            zero_origin=True,
+        )
+
+        self.assertIn('data-zero-origin="true"', panel)
+        for label in ("0", "1", "10", "100"):
+            self.assertRegex(panel, rf'class="axis-tick-label axis-tick-x"[^>]*>{label}<')
+        self.assertIn("Cumulative percent of peaks", panel)
+        self.assertIn("<title>S1: 0 fragments; 40% cumulative; count 2</title>", panel)
+
+    def test_profile_chart_uses_target_color_tss_reference_and_direct_labels(self):
+        panel = visuals.render_profile_chart(
+            "TSS profiles",
+            {
+                "S1": [(-10, 1.0), (0, 4.0), (10, 2.0)],
+                "S2": [(-10, 2.0), (0, 5.0), (10, 2.0)],
+            },
+            self.metadata(),
+            x_axis_label="Position relative to TSS (bp)",
+            y_axis_label="Mean coverage (RPKM)",
+        )
+
+        self.assertEqual(
+            len(re.findall(r'class="profile-trace"[^>]*stroke="#2F78D1"', panel)),
+            2,
+        )
+        self.assertIn('class="zero-reference"', panel)
+        self.assertIn("Mean coverage (RPKM)", panel)
+        self.assertEqual(panel.count('class="endpoint-label"'), 2)
+        self.assertIn(">S1<", panel)
+        self.assertIn(">S2<", panel)
+
+
 class BarAndScatterRenderingTests(unittest.TestCase):
     def test_bar_panel_labels_axes_values_targets_and_exact_tooltips(self):
         panel = visuals.render_bar_panel(

@@ -20,8 +20,14 @@ from typing import Mapping, Sequence
 from motif_qc import read_ame
 from qc_dashboard_visuals import (
     BarMetric,
+    bin_weighted_series,
+    format_significant,
+    histogram_ecdf,
     render_bar_panel,
+    render_binned_distribution,
+    render_ecdf,
     render_panel_grid,
+    render_profile_chart,
     render_range_panel,
     render_scatter_panel,
 )
@@ -1988,6 +1994,13 @@ def _section(section_id: str, title: str, content: str) -> str:
 def render_dashboard(data: Mapping[str, object]) -> str:
     """Return a self-contained descriptive dashboard with inline SVG and tables."""
     samples = _samples(data)
+    series_metadata = {
+        str(sample.get("sample_id", "")): {
+            "assay_target": sample.get("assay_target"),
+            "is_control": sample.get("is_control"),
+        }
+        for sample in samples
+    }
     summary_rows = derive_dashboard_rows(
         [_summary_row(sample) for sample in samples]
     )
@@ -2105,27 +2118,40 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         summary_rows, empty_message="No alignment metrics available",
         aria_label="Alignment and library QC table",
     )
-    insert_rows: list[dict[str, object]] = []
+    insert_weighted: dict[str, list[tuple[int, int]]] = {}
     for sample in samples:
         distribution = _nested(sample, "library").get("insert_size_distribution")
         if not isinstance(distribution, list):
             continue
+        sample_id = str(sample.get("sample_id", ""))
+        observations: list[tuple[int, int]] = []
         for row in distribution:
             if isinstance(row, Mapping):
-                insert_rows.append({
-                    "sample_id": sample.get("sample_id"),
-                    "is_control": sample.get("is_control"),
-                    "insert_size": row.get("insert_size"),
-                    "pair_count": row.get("pair_count"),
-                })
-    insert = render_distribution_chart(
-        "Insert-size distribution", insert_rows,
-        x_key="insert_size", value_key="pair_count",
-        x_axis_label="Insert size (bp)", y_axis_label="Read pairs",
+                insert_size = row.get("insert_size")
+                pair_count = row.get("pair_count")
+                if isinstance(insert_size, int) and isinstance(pair_count, int):
+                    observations.append((insert_size, pair_count))
+        insert_weighted[sample_id] = observations
+    insert_binned = bin_weighted_series(insert_weighted, bin_size=250)
+    insert = render_binned_distribution(
+        "Insert-size distribution",
+        insert_binned,
+        series_metadata,
+        x_axis_label="Insert size (bp)",
     )
+    insert_rows = [
+        {
+            "sample_id": sample_id,
+            "bin": f'[{row["bin_start"]}, {row["bin_end"]})',
+            "pair_count": row["count"],
+            "percent": row["percent"],
+        }
+        for sample_id, rows in insert_binned.items()
+        for row in rows
+    ]
     insert += render_table(
-        [("sample_id", "Sample"), ("insert_size", "Insert size (bp)"),
-         ("pair_count", "Read pairs")],
+        [("sample_id", "Sample"), ("bin", "Insert-size bin (bp)"),
+         ("pair_count", "Read pairs"), ("percent", "Percent")],
         insert_rows, empty_message="No insert-size distribution data available",
         aria_label="Insert-size distribution table",
         row_limit=2000,
@@ -2174,6 +2200,50 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         aria_label="Peak QC panels",
     )
     peaks = peak_grid
+    fragments_per_peak_series: dict[str, list[dict[str, float | int]]] = {}
+    zero_peak_notes = []
+    for sample in samples:
+        if bool(sample.get("is_control")):
+            continue
+        sample_id = str(sample.get("sample_id", ""))
+        distribution = _nested(sample, "peak").get(
+            "fragments_per_peak_distribution"
+        )
+        if not isinstance(distribution, list):
+            continue
+        histogram = []
+        for row in distribution:
+            if not isinstance(row, Mapping):
+                continue
+            fragment_count = row.get("fragment_count")
+            peak_count = row.get("peak_count")
+            if isinstance(fragment_count, int) and isinstance(peak_count, int):
+                histogram.append((fragment_count, peak_count))
+        ecdf = histogram_ecdf(histogram)
+        fragments_per_peak_series[sample_id] = ecdf
+        total_peaks = sum(count for _, count in histogram)
+        zero_peaks = sum(count for value, count in histogram if value == 0)
+        if total_peaks:
+            zero_percent = 100.0 * zero_peaks / total_peaks
+            zero_peak_notes.append(
+                f"{html.escape(sample_id)}: "
+                f"{html.escape(format_significant(zero_percent, compact=False))}% "
+                "of peaks have zero fragments"
+            )
+    fragments_per_peak_panel = render_ecdf(
+        "Fragments per peak",
+        fragments_per_peak_series,
+        series_metadata,
+        x_axis_label="Fragments per peak",
+        zero_origin=True,
+    )
+    if zero_peak_notes:
+        fragments_per_peak_panel += (
+            '<p class="panel-note">'
+            + "; ".join(zero_peak_notes)
+            + ".</p>"
+        )
+    peaks += fragments_per_peak_panel
     peaks += render_table(
         [("sample_id", "Sample"), ("peak_count", "Peak count"),
          ("total_covered_bases", "Covered bases"),
@@ -2186,36 +2256,46 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         summary_rows, empty_message="No peak metrics available",
         aria_label="Peaks and FRiP table",
     )
-    peak_width_rows: list[dict[str, object]] = []
+    peak_width_weighted: dict[str, list[tuple[int, int]]] = {}
     for sample in samples:
         distribution = _nested(sample, "peak").get("width_distribution")
         if not isinstance(distribution, list):
             continue
+        sample_id = str(sample.get("sample_id", ""))
+        observations: list[tuple[int, int]] = []
         for row in distribution:
             if isinstance(row, Mapping):
-                peak_width_rows.append({
-                    "sample_id": sample.get("sample_id"),
-                    "is_control": sample.get("is_control"),
-                    "width": row.get("width"),
-                    "peak_count": row.get("peak_count"),
-                })
-    peak_width = render_distribution_chart(
-        "Peak-width distribution", peak_width_rows,
-        x_key="width", value_key="peak_count",
-        x_axis_label="Peak width (bp)", y_axis_label="Peaks",
+                width = row.get("width")
+                peak_count = row.get("peak_count")
+                if isinstance(width, int) and isinstance(peak_count, int):
+                    observations.append((width, peak_count))
+        peak_width_weighted[sample_id] = observations
+    peak_width_binned = bin_weighted_series(peak_width_weighted, bin_size=250)
+    peak_width = render_binned_distribution(
+        "Peak-width distribution",
+        peak_width_binned,
+        series_metadata,
+        x_axis_label="Peak width (bp)",
     )
+    peak_width_rows = [
+        {
+            "sample_id": sample_id,
+            "bin": f'[{row["bin_start"]}, {row["bin_end"]})',
+            "peak_count": row["count"],
+            "percent": row["percent"],
+        }
+        for sample_id, rows in peak_width_binned.items()
+        for row in rows
+    ]
     peak_width += render_table(
-        [("sample_id", "Sample"), ("width", "Peak width (bp)"),
-         ("peak_count", "Peaks")],
+        [("sample_id", "Sample"), ("bin", "Peak-width bin (bp)"),
+         ("peak_count", "Peaks"), ("percent", "Percent")],
         peak_width_rows, empty_message="No peak-width distribution data available",
         aria_label="Peak-width distribution table",
         row_limit=2000,
     )
     profiles = {
-        str(sample.get("sample_id", "")): {
-            "profile": _nested(sample, "tss").get("profile", []),
-            "is_control": sample.get("is_control"),
-        }
+        str(sample.get("sample_id", "")): _nested(sample, "tss").get("profile", [])
         for sample in samples if isinstance(_nested(sample, "tss").get("profile"), Sequence)
     }
     tss = render_panel_grid(
@@ -2229,7 +2309,13 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         ],
         aria_label="TSS score panel",
     )
-    tss += render_line_chart("TSS profiles", profiles)
+    tss += render_profile_chart(
+        "TSS profiles",
+        profiles,
+        series_metadata,
+        x_axis_label="Position relative to TSS (bp)",
+        y_axis_label="Mean coverage (RPKM)",
+    )
     tss += render_table(
         [("sample_id", "Sample"), ("tss_status", "Status"), ("tss_enrichment", "TSS enrichment")],
         summary_rows, empty_message="No TSS metrics available",

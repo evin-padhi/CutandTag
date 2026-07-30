@@ -713,6 +713,551 @@ def render_scatter_panel(
     )
 
 
+def _series_metadata(
+    sample_id: str, metadata: Mapping[str, Mapping[str, object]]
+) -> tuple[str, bool, SeriesStyle]:
+    sample_metadata = metadata.get(sample_id, {})
+    assay_target = str(sample_metadata.get("assay_target", ""))
+    is_control = bool(sample_metadata.get("is_control"))
+    return (
+        assay_target,
+        is_control,
+        series_style(sample_id, assay_target, is_control=is_control),
+    )
+
+
+def _line_marker(
+    style: SeriesStyle, *, x: float, y: float, tooltip: str,
+    css_class: str = "series-point", attributes: str = "",
+) -> str:
+    escaped_tooltip = html.escape(tooltip)
+    if style.marker == "square":
+        return (
+            f'<rect class="{css_class}" {attributes}x="{x - 3.0:.1f}" '
+            f'y="{y - 3.0:.1f}" width="6" height="6" fill="{style.color}">'
+            f"<title>{escaped_tooltip}</title></rect>"
+        )
+    return (
+        f'<circle class="{css_class}" {attributes}cx="{x:.1f}" cy="{y:.1f}" '
+        f'r="3" fill="{style.color}"><title>{escaped_tooltip}</title></circle>'
+    )
+
+
+def _direct_label_geometry(
+    endpoints: Sequence[tuple[str, float]], *, plot_top: float,
+    minimum_plot_bottom: float, minimum_gap: float = 14.0,
+) -> tuple[float, dict[str, float]]:
+    """Pack endpoint labels, expanding the plot rather than omitting a sample."""
+    required_span = minimum_gap * max(0, len(endpoints) - 1)
+    plot_bottom = max(minimum_plot_bottom, plot_top + required_span + 8.0)
+    positions = pack_endpoint_labels(
+        endpoints,
+        lower=plot_top + 4.0,
+        upper=plot_bottom - 4.0,
+        minimum_gap=minimum_gap,
+    )
+    return plot_bottom, positions
+
+
+def _endpoint_label(
+    sample_id: str, *, endpoint_x: float, endpoint_y: float,
+    label_x: float, label_y: float, style: SeriesStyle,
+) -> str:
+    leader = ""
+    if abs(endpoint_y - label_y) >= 0.5:
+        leader = (
+            f'<line class="endpoint-leader" x1="{endpoint_x:.1f}" '
+            f'y1="{endpoint_y:.1f}" x2="{label_x - 4.0:.1f}" '
+            f'y2="{label_y:.1f}" stroke="{style.color}" stroke-width="1"/>'
+        )
+    return (
+        leader
+        + f'<text class="endpoint-label" x="{label_x:.1f}" '
+        f'y="{label_y:.1f}" fill="{style.color}" dominant-baseline="middle">'
+        f"{html.escape(sample_id)}</text>"
+    )
+
+
+def _line_legend_entry(
+    sample_id: str, assay_target: str, style: SeriesStyle
+) -> str:
+    kind = "control" if style.is_control else "target"
+    return (
+        f'<li data-sample-kind="{kind}">'
+        '<svg class="series-swatch" viewBox="0 0 36 10" '
+        'aria-hidden="true" focusable="false">'
+        f'<line x1="0" y1="5" x2="36" y2="5" stroke="{style.color}" '
+        f'stroke-width="2" stroke-dasharray="{style.dash}"/></svg>'
+        f'<span>{html.escape(sample_id)} ({html.escape(assay_target)})</span></li>'
+    )
+
+
+def render_binned_distribution(
+    title: str,
+    series: Mapping[str, Sequence[Mapping[str, object]]],
+    metadata: Mapping[str, Mapping[str, object]],
+    *,
+    x_axis_label: str,
+) -> str:
+    """Render cohort-normalized binned distributions with direct sample labels."""
+    prepared: dict[str, list[tuple[float, float, int, int, int]]] = {}
+    for sample_id, rows in series.items():
+        points = []
+        for row in rows:
+            bin_start = _numeric(row.get("bin_start"))
+            bin_end = _numeric(row.get("bin_end"))
+            percent = _numeric(row.get("percent"))
+            count = _numeric(row.get("count"))
+            if (
+                bin_start is None or bin_end is None or percent is None
+                or count is None or bin_start < 0 or bin_end <= bin_start
+                or percent < 0 or count < 0
+            ):
+                continue
+            points.append((
+                (bin_start + bin_end) / 2.0,
+                percent,
+                int(bin_start),
+                int(bin_end),
+                int(count),
+            ))
+        if points:
+            prepared[str(sample_id)] = sorted(points)
+    if not prepared:
+        return _empty_panel(title, f"{x_axis_label}; Percent")
+
+    all_points = [point for points in prepared.values() for point in points]
+    x_max = max(point[3] for point in all_points)
+    y_max = _nice_linear_max(max(point[1] for point in all_points))
+    left, plot_top, minimum_plot_bottom = 62.0, 32.0, 236.0
+    right, label_x = 535.0, 557.0
+
+    def provisional_y(value: float) -> float:
+        return minimum_plot_bottom - value / y_max * (
+            minimum_plot_bottom - plot_top
+        )
+
+    endpoint_requests = [
+        (sample_id, provisional_y(points[-1][1]))
+        for sample_id, points in prepared.items()
+    ]
+    plot_bottom, label_positions = _direct_label_geometry(
+        endpoint_requests,
+        plot_top=plot_top,
+        minimum_plot_bottom=minimum_plot_bottom,
+    )
+    width = max(
+        680.0,
+        label_x + max(len(sample_id) for sample_id in prepared) * 7.0 + 18.0,
+    )
+    height = plot_bottom + 48.0
+
+    def x_position(value: float) -> float:
+        return left + value / (x_max or 1.0) * (right - left)
+
+    def y_position(value: float) -> float:
+        return plot_bottom - value / y_max * (plot_bottom - plot_top)
+
+    x_ticks_raw = [x_max * index / 4.0 for index in range(5)]
+    x_ticks = [
+        (value, format_significant(value, compact=True))
+        for value in x_ticks_raw
+    ]
+    percent_axis_label = (
+        "Percent of read pairs"
+        if "insert" in title.lower()
+        else "Percent of peaks"
+    )
+    y_ticks = [
+        (value, format_significant(value, compact=False))
+        for value in _linear_ticks(y_max)
+    ]
+    marks = []
+    legend = []
+    for sample_id, points in sorted(prepared.items()):
+        assay_target, _, style = _series_metadata(sample_id, metadata)
+        plotted = [
+            (x_position(midpoint), y_position(percent))
+            for midpoint, percent, _, _, _ in points
+        ]
+        attributes = (
+            f'data-sample-id="{html.escape(sample_id, quote=True)}" '
+            f'data-assay-target="{html.escape(assay_target, quote=True)}" '
+            f'data-sample-kind="{"control" if style.is_control else "target"}" '
+            f'data-marker="{style.marker}" '
+        )
+        marks.append(
+            f'<polyline class="distribution-trace" {attributes}'
+            f'points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in plotted)}" '
+            f'fill="none" stroke="{style.color}" stroke-width="2" '
+            f'stroke-dasharray="{style.dash}"/>'
+        )
+        for (midpoint, percent, bin_start, bin_end, count), (x, y) in zip(
+            points, plotted
+        ):
+            tooltip = (
+                f"{sample_id}: [{bin_start}, {bin_end}) bp; "
+                f"{_exact_number(percent)}%; count {count}"
+            )
+            point_attributes = (
+                f'data-sample-id="{html.escape(sample_id, quote=True)}" '
+                f'data-percent="{_exact_number(percent)}" '
+                f'data-bin-midpoint="{_exact_number(midpoint)}" '
+            )
+            marks.append(
+                _line_marker(
+                    style, x=x, y=y, tooltip=tooltip,
+                    attributes=point_attributes,
+                )
+            )
+        endpoint_x, endpoint_y = plotted[-1]
+        marks.append(
+            _endpoint_label(
+                sample_id,
+                endpoint_x=endpoint_x,
+                endpoint_y=endpoint_y,
+                label_x=label_x,
+                label_y=label_positions[sample_id],
+                style=style,
+            )
+        )
+        legend.append(_line_legend_entry(sample_id, assay_target, style))
+
+    accessible_name = f"{title}: {x_axis_label} by percent"
+    svg = (
+        f'<svg class="panel-chart distribution-chart" width="{width:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        f'aria-label="{html.escape(accessible_name, quote=True)}">'
+        f"<title>{html.escape(accessible_name)}</title>"
+        f'<text class="axis-title axis-title-x" x="{(left + right) / 2:.1f}" '
+        f'y="{height - 8:.1f}" text-anchor="middle">'
+        f"{html.escape(x_axis_label)}</text>"
+        f'<text class="axis-title axis-title-y" x="16" '
+        f'y="{(plot_top + plot_bottom) / 2:.1f}" '
+        f'transform="rotate(-90 16 {(plot_top + plot_bottom) / 2:.1f})" '
+        f'text-anchor="middle">{percent_axis_label}</text>'
+        + _svg_axis_x_ticks(
+            x_ticks, left=left, right=right, plot_bottom=plot_bottom,
+            domain_min=0.0, domain_max=x_max,
+        )
+        + _svg_axis_y(
+            y_ticks, left=left, right=right, plot_top=plot_top,
+            plot_bottom=plot_bottom, domain_min=0.0, domain_max=y_max,
+        )
+        + "".join(marks)
+        + "</svg>"
+    )
+    return (
+        f'<article class="qc-panel"><h3>{html.escape(title)}</h3>'
+        f'<div class="panel-scroll" role="region" '
+        f'aria-label="{html.escape(title, quote=True)} chart" tabindex="0">'
+        f"{svg}</div><ol class=\"series-legend compact\">"
+        + "".join(legend)
+        + "</ol></article>"
+    )
+
+
+def render_ecdf(
+    title: str,
+    series: Mapping[str, Sequence[Mapping[str, object]]],
+    metadata: Mapping[str, Mapping[str, object]],
+    *,
+    x_axis_label: str,
+    zero_origin: bool,
+) -> str:
+    """Render ECDF traces, reserving a separate x-axis slot for exact zero."""
+    prepared: dict[str, list[tuple[int, float, int]]] = {}
+    for sample_id, rows in series.items():
+        points = []
+        for row in rows:
+            value = _numeric(row.get("value"))
+            cumulative = _numeric(row.get("cumulative_percent"))
+            count = _numeric(row.get("count"))
+            if (
+                value is None or cumulative is None or count is None
+                or value < 0 or cumulative < 0 or count < 0
+                or int(value) != value
+            ):
+                continue
+            points.append((int(value), cumulative, int(count)))
+        if points:
+            prepared[str(sample_id)] = sorted(points)
+    if not prepared:
+        return _empty_panel(title, f"{x_axis_label}; Cumulative percent")
+
+    maximum_value = max(
+        value for points in prepared.values() for value, _, _ in points
+    )
+    maximum_power = max(0, math.ceil(math.log10(maximum_value))) if maximum_value else 0
+    left, plot_top, minimum_plot_bottom = 62.0, 32.0, 236.0
+    right, label_x = 535.0, 557.0
+    x_domain_max = float(maximum_power + 1 if zero_origin else maximum_power)
+    if x_domain_max <= 0:
+        x_domain_max = 1.0
+
+    def transformed_x(value: int) -> float:
+        if zero_origin:
+            return 0.0 if value == 0 else 1.0 + math.log10(value)
+        return math.log10(max(value, 1))
+
+    endpoint_requests = [
+        (
+            sample_id,
+            minimum_plot_bottom - points[-1][1] / 100.0
+            * (minimum_plot_bottom - plot_top),
+        )
+        for sample_id, points in prepared.items()
+    ]
+    plot_bottom, label_positions = _direct_label_geometry(
+        endpoint_requests,
+        plot_top=plot_top,
+        minimum_plot_bottom=minimum_plot_bottom,
+    )
+    width = max(
+        680.0,
+        label_x + max(len(sample_id) for sample_id in prepared) * 7.0 + 18.0,
+    )
+    height = plot_bottom + 48.0
+
+    def x_position(value: int) -> float:
+        return left + transformed_x(value) / x_domain_max * (right - left)
+
+    def y_position(value: float) -> float:
+        return plot_bottom - value / 100.0 * (plot_bottom - plot_top)
+
+    x_ticks = []
+    if zero_origin:
+        x_ticks.append((0.0, "0"))
+        x_ticks.extend(
+            (float(power + 1), str(10 ** power))
+            for power in range(maximum_power + 1)
+        )
+    else:
+        x_ticks.extend(
+            (float(power), str(10 ** power))
+            for power in range(maximum_power + 1)
+        )
+    y_ticks = [(value, format(value, ".0f")) for value in (0, 25, 50, 75, 100)]
+    marks = []
+    legend = []
+    for sample_id, points in sorted(prepared.items()):
+        assay_target, _, style = _series_metadata(sample_id, metadata)
+        plotted = [
+            (x_position(value), y_position(cumulative))
+            for value, cumulative, _ in points
+        ]
+        attributes = (
+            f'data-sample-id="{html.escape(sample_id, quote=True)}" '
+            f'data-assay-target="{html.escape(assay_target, quote=True)}" '
+            f'data-sample-kind="{"control" if style.is_control else "target"}" '
+            f'data-marker="{style.marker}" '
+        )
+        marks.append(
+            f'<polyline class="ecdf-trace" {attributes}'
+            f'points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in plotted)}" '
+            f'fill="none" stroke="{style.color}" stroke-width="2" '
+            f'stroke-dasharray="{style.dash}"/>'
+        )
+        for (value, cumulative, count), (x, y) in zip(points, plotted):
+            tooltip = (
+                f"{sample_id}: {value} fragments; "
+                f"{_exact_number(cumulative)}% cumulative; count {count}"
+            )
+            marks.append(
+                _line_marker(style, x=x, y=y, tooltip=tooltip)
+            )
+        endpoint_x, endpoint_y = plotted[-1]
+        marks.append(
+            _endpoint_label(
+                sample_id,
+                endpoint_x=endpoint_x,
+                endpoint_y=endpoint_y,
+                label_x=label_x,
+                label_y=label_positions[sample_id],
+                style=style,
+            )
+        )
+        legend.append(_line_legend_entry(sample_id, assay_target, style))
+
+    accessible_name = f"{title}: {x_axis_label} ECDF"
+    svg = (
+        f'<svg class="panel-chart ecdf-chart" data-zero-origin="'
+        f'{"true" if zero_origin else "false"}" width="{width:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        f'aria-label="{html.escape(accessible_name, quote=True)}">'
+        f"<title>{html.escape(accessible_name)}</title>"
+        f'<text class="axis-title axis-title-x" x="{(left + right) / 2:.1f}" '
+        f'y="{height - 8:.1f}" text-anchor="middle">'
+        f"{html.escape(x_axis_label)} (log10 positive values)</text>"
+        f'<text class="axis-title axis-title-y" x="16" '
+        f'y="{(plot_top + plot_bottom) / 2:.1f}" '
+        f'transform="rotate(-90 16 {(plot_top + plot_bottom) / 2:.1f})" '
+        'text-anchor="middle">Cumulative percent of peaks</text>'
+        + _svg_axis_x_ticks(
+            x_ticks, left=left, right=right, plot_bottom=plot_bottom,
+            domain_min=0.0, domain_max=x_domain_max,
+        )
+        + _svg_axis_y(
+            y_ticks, left=left, right=right, plot_top=plot_top,
+            plot_bottom=plot_bottom, domain_min=0.0, domain_max=100.0,
+        )
+        + "".join(marks)
+        + "</svg>"
+    )
+    return (
+        f'<article class="qc-panel"><h3>{html.escape(title)}</h3>'
+        f'<div class="panel-scroll" role="region" '
+        f'aria-label="{html.escape(title, quote=True)} chart" tabindex="0">'
+        f"{svg}</div><ol class=\"series-legend compact\">"
+        + "".join(legend)
+        + "</ol></article>"
+    )
+
+
+def render_profile_chart(
+    title: str,
+    series: Mapping[str, Sequence[tuple[int, float | None]]],
+    metadata: Mapping[str, Mapping[str, object]],
+    *,
+    x_axis_label: str,
+    y_axis_label: str,
+) -> str:
+    """Render target-colored profiles with a TSS reference and direct labels."""
+    prepared: dict[str, list[tuple[float, float]]] = {}
+    for sample_id, rows in series.items():
+        points = []
+        for position, signal in rows:
+            numeric_position = _numeric(position)
+            numeric_signal = _numeric(signal)
+            if (
+                numeric_position is None or numeric_signal is None
+                or numeric_signal < 0
+            ):
+                continue
+            points.append((numeric_position, numeric_signal))
+        if points:
+            prepared[str(sample_id)] = sorted(points)
+    if not prepared:
+        return _empty_panel(title, f"{x_axis_label}; {y_axis_label}")
+
+    all_points = [point for points in prepared.values() for point in points]
+    x_min = min(point[0] for point in all_points)
+    x_max = max(point[0] for point in all_points)
+    y_max = _nice_linear_max(max(point[1] for point in all_points))
+    left, plot_top, minimum_plot_bottom = 62.0, 32.0, 236.0
+    right, label_x = 535.0, 557.0
+
+    def provisional_y(value: float) -> float:
+        return minimum_plot_bottom - value / y_max * (
+            minimum_plot_bottom - plot_top
+        )
+
+    plot_bottom, label_positions = _direct_label_geometry(
+        [
+            (sample_id, provisional_y(points[-1][1]))
+            for sample_id, points in prepared.items()
+        ],
+        plot_top=plot_top,
+        minimum_plot_bottom=minimum_plot_bottom,
+    )
+    width = max(
+        680.0,
+        label_x + max(len(sample_id) for sample_id in prepared) * 7.0 + 18.0,
+    )
+    height = plot_bottom + 48.0
+
+    def x_position(value: float) -> float:
+        return left + (value - x_min) / (x_max - x_min or 1.0) * (right - left)
+
+    def y_position(value: float) -> float:
+        return plot_bottom - value / y_max * (plot_bottom - plot_top)
+
+    x_ticks_raw = [
+        x_min + (x_max - x_min) * index / 4.0 for index in range(5)
+    ]
+    x_ticks = [
+        (value, format_significant(value, compact=True))
+        for value in x_ticks_raw
+    ]
+    y_ticks = [
+        (value, format_significant(value, compact=True))
+        for value in _linear_ticks(y_max)
+    ]
+    marks = []
+    legend = []
+    for sample_id, points in sorted(prepared.items()):
+        assay_target, _, style = _series_metadata(sample_id, metadata)
+        plotted = [
+            (x_position(position), y_position(signal))
+            for position, signal in points
+        ]
+        attributes = (
+            f'data-sample-id="{html.escape(sample_id, quote=True)}" '
+            f'data-assay-target="{html.escape(assay_target, quote=True)}" '
+            f'data-sample-kind="{"control" if style.is_control else "target"}" '
+            f'data-marker="{style.marker}" '
+        )
+        marks.append(
+            f'<polyline class="profile-trace" {attributes}'
+            f'points="{" ".join(f"{x:.1f},{y:.1f}" for x, y in plotted)}" '
+            f'fill="none" stroke="{style.color}" stroke-width="2" '
+            f'stroke-dasharray="{style.dash}"/>'
+        )
+        endpoint_x, endpoint_y = plotted[-1]
+        marks.append(
+            _endpoint_label(
+                sample_id,
+                endpoint_x=endpoint_x,
+                endpoint_y=endpoint_y,
+                label_x=label_x,
+                label_y=label_positions[sample_id],
+                style=style,
+            )
+        )
+        legend.append(_line_legend_entry(sample_id, assay_target, style))
+    zero_reference = ""
+    if x_min <= 0 <= x_max:
+        zero_x = x_position(0)
+        zero_reference = (
+            f'<line class="zero-reference" x1="{zero_x:.1f}" y1="{plot_top:.1f}" '
+            f'x2="{zero_x:.1f}" y2="{plot_bottom:.1f}" stroke="#555" '
+            'stroke-width="1.5" stroke-dasharray="4 3"/>'
+        )
+    accessible_name = f"{title}: {x_axis_label} by {y_axis_label}"
+    svg = (
+        f'<svg class="panel-chart profile-chart" width="{width:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        f'aria-label="{html.escape(accessible_name, quote=True)}">'
+        f"<title>{html.escape(accessible_name)}</title>"
+        f'<text class="axis-title axis-title-x" x="{(left + right) / 2:.1f}" '
+        f'y="{height - 8:.1f}" text-anchor="middle">'
+        f"{html.escape(x_axis_label)}</text>"
+        f'<text class="axis-title axis-title-y" x="16" '
+        f'y="{(plot_top + plot_bottom) / 2:.1f}" '
+        f'transform="rotate(-90 16 {(plot_top + plot_bottom) / 2:.1f})" '
+        f'text-anchor="middle">{html.escape(y_axis_label)}</text>'
+        + _svg_axis_x_ticks(
+            x_ticks, left=left, right=right, plot_bottom=plot_bottom,
+            domain_min=x_min, domain_max=x_max,
+        )
+        + _svg_axis_y(
+            y_ticks, left=left, right=right, plot_top=plot_top,
+            plot_bottom=plot_bottom, domain_min=0.0, domain_max=y_max,
+        )
+        + zero_reference
+        + "".join(marks)
+        + "</svg>"
+    )
+    return (
+        f'<article class="qc-panel"><h3>{html.escape(title)}</h3>'
+        f'<div class="panel-scroll" role="region" '
+        f'aria-label="{html.escape(title, quote=True)} chart" tabindex="0">'
+        f"{svg}</div><ol class=\"series-legend compact\">"
+        + "".join(legend)
+        + "</ol></article>"
+    )
+
+
 def render_panel_grid(panels: Sequence[str], *, aria_label: str) -> str:
     """Group dashboard panels into a responsive, accessibly named grid."""
     return (

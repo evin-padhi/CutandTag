@@ -1463,11 +1463,86 @@ class DashboardOutputTests(unittest.TestCase):
         )
         dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
         self.assertIn("Insert-size distribution", dashboard)
-        self.assertIn(">147<", dashboard)
+        self.assertIn(">[0, 250)<", dashboard)
         self.assertIn(">23<", dashboard)
         self.assertIn("Peak-width distribution", dashboard)
-        self.assertIn(">321<", dashboard)
+        self.assertIn(">[250, 500)<", dashboard)
         self.assertIn(">7<", dashboard)
+
+    def test_dashboard_bins_insert_and_peak_width_distributions_across_samples(self):
+        data = self.report_data()
+        data["samples_by_id"]["A_IGG"]["library"]["insert_size_distribution"] = [
+            {"insert_size": 10, "pair_count": 1},
+        ]
+        data["samples_by_id"]["Z_TARGET"]["library"]["insert_size_distribution"] = [
+            {"insert_size": 260, "pair_count": 1},
+            {"insert_size": 510, "pair_count": 2},
+        ]
+        data["samples_by_id"]["Z_TARGET"]["peak"]["width_distribution"] = [
+            {"width": 20, "peak_count": 1},
+            {"width": 260, "peak_count": 3},
+        ]
+
+        dashboard = qc.render_dashboard(data)
+
+        insert_section = dashboard[
+            dashboard.index('id="insert-size-distribution"'):
+            dashboard.index('id="peaks-frip"')
+        ]
+        self.assertIn("Percent of read pairs", insert_section)
+        self.assertIn(">[0, 250)<", insert_section)
+        self.assertIn(">[250, 500)<", insert_section)
+        self.assertIn(">[500, 750)<", insert_section)
+        self.assertIn(">100<", insert_section)
+        self.assertAlmostEqual(
+            sum(
+                float(value)
+                for value in re.findall(
+                    r'data-sample-id="Z_TARGET"[^>]*data-percent="([0-9.]+)"',
+                    insert_section,
+                )
+            ),
+            100.0,
+        )
+
+        width_section = dashboard[
+            dashboard.index('id="peak-width-distribution"'):
+            dashboard.index('id="tss-enrichment"')
+        ]
+        self.assertIn("Percent of peaks", width_section)
+        self.assertIn(">[0, 250)<", width_section)
+        self.assertIn(">[250, 500)<", width_section)
+
+    def test_dashboard_renders_fragments_per_peak_ecdf_and_target_colored_tss_profiles(self):
+        data = self.report_data()
+        data["samples_by_id"]["Z_TARGET"]["peak"][
+            "fragments_per_peak_distribution"
+        ] = [
+            {"fragment_count": 0, "peak_count": 2},
+            {"fragment_count": 1, "peak_count": 1},
+            {"fragment_count": 10, "peak_count": 1},
+        ]
+
+        dashboard = qc.render_dashboard(data)
+
+        peak_section = dashboard[
+            dashboard.index('id="peaks-frip"'):
+            dashboard.index('id="peak-width-distribution"')
+        ]
+        self.assertIn("<h3>Fragments per peak</h3>", peak_section)
+        self.assertIn("Cumulative percent of peaks", peak_section)
+        self.assertIn("50.0% of peaks have zero fragments", peak_section)
+        self.assertIn('data-zero-origin="true"', peak_section)
+
+        tss_section = dashboard[
+            dashboard.index('id="tss-enrichment"'):
+            dashboard.index('id="motif-enrichment"')
+        ]
+        self.assertIn("Mean coverage (RPKM)", tss_section)
+        self.assertIn('class="zero-reference"', tss_section)
+        self.assertIn('data-assay-target="CTCF"', tss_section)
+        self.assertIn('stroke="#2F78D1"', tss_section)
+        self.assertIn('class="endpoint-label"', tss_section)
 
     def test_tidy_exports_exclude_controls_limit_motifs_and_order_rows(self):
         """Controls must not leak into motif biology and sortable exports stay stable."""
