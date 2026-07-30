@@ -120,7 +120,9 @@ checks = {
     "deepTools computes a reference-point TSS matrix and profile":
         "computeMatrix reference-point" in tss
         and "--referencePoint TSS" in tss
-        and "plotProfile" in tss,
+        and "plotProfile" in tss
+        and '--outFileNameData "${outputStem}.tss_profile.tsv"' in tss
+        and 'path("*.tss_profile.tsv")' in tss,
     "MULTIQC and custom-content formatter processes are declared":
         all(name in multiqc for name in (
             "process DEMUX_QC_CUSTOM",
@@ -216,6 +218,8 @@ checks = {
         and "annotation_mode != 'none'" in qc,
     "TSS BED takes precedence over GTF when both are present":
         "tss_rows ? 'bed'" in qc,
+    "TSS profile tuple retains the profile-data table":
+        "meta, bed, matrix, matrixTable, profile, profileTable, status" in qc,
     "IgG and target library metrics both feed the report":
         "FILTERED_BAM_QC(safe_filtered_bams)" in qc
         and "LIBRARY_QC_CUSTOM(library_qc_inputs)" in qc,

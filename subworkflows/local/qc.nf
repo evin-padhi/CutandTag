@@ -288,7 +288,7 @@ workflow QC {
         }
         .map { holder -> holder.files }
     tss_status_files = TSS_ENRICHMENT.out.profiles
-        .map { meta, bed, matrix, matrixTable, profile, status -> status }
+        .map { meta, bed, matrix, matrixTable, profile, profileTable, status -> status }
         .reduce([files: []]) { holder, path ->
             [files: holder.files + [path]]
         }
