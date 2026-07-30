@@ -148,11 +148,17 @@ for sample_id, source in zip(result_sample_ids, ame_tables):
 
 ame_status_by_sample = {}
 for sample_id, path in zip(status_sample_ids, status_tables):
-    with path.open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle, delimiter="\t"))
-    if len(rows) != 1 or not rows[0].get("status", "").strip():
-        raise SystemExit(f"{path}: AME status must contain exactly one non-blank status")
-    ame_status_by_sample[sample_id] = rows[0]["status"].strip()
+    status_bytes = path.read_bytes()
+    allowed_statuses = {
+        b"status\\tcomputed\\n": "computed",
+        b"status\\tno_peaks\\n": "no_peaks",
+    }
+    if status_bytes not in allowed_statuses:
+        raise SystemExit(
+            f"{path}: AME status must be exactly status followed by "
+            "computed or no_peaks"
+        )
+    ame_status_by_sample[sample_id] = allowed_statuses[status_bytes]
 
 normalized_motif = Path("dashboard_inputs/normalized_motif")
 for source in sorted(Path("dashboard_inputs/motif").glob("metrics*/*")):

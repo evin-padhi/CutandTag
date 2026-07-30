@@ -23,6 +23,7 @@ done
 
 python3 - <<'PY'
 from pathlib import Path
+import codecs
 import re
 
 root = Path.cwd()
@@ -326,6 +327,23 @@ if not motif_formatter:
 (Path.cwd() / ".motif_qc_formatter.test.py").write_text(
     motif_formatter.group(1).replace("\\\\", "\\") + "\n"
 )
+dashboard_preprocessor = re.search(
+    r"python <<'PY'\n(.*?)\nPY",
+    qc_dashboard,
+    re.DOTALL,
+)
+if not dashboard_preprocessor:
+    raise SystemExit("FAIL: could not extract QC dashboard preprocessor")
+dashboard_source = dashboard_preprocessor.group(1)
+dashboard_source = dashboard_source.replace(
+    "${resultSampleIdsJson}", '["TARGET_A", "TARGET_B"]'
+).replace(
+    "${statusSampleIdsJson}", '["TARGET_A", "TARGET_B"]'
+)
+dashboard_source = codecs.decode(dashboard_source, "unicode_escape")
+(Path.cwd() / ".qc_dashboard_preprocess.test.py").write_text(
+    dashboard_source + "\n"
+)
 gtf_prepare = re.search(
     r"def prepareTss = annotation_mode == 'gtf' \? '''\n(.*?)\n    ''' : '''",
     tss,
@@ -341,7 +359,7 @@ if not gtf_prepare:
 PY
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/nanocut-qc.XXXXXX")
-trap 'rm -rf -- "${tmp_dir:?}" .fragment_pairs.test.awk .filtered_flags.test.awk .multiqc_aggregate.test.py .library_qc_formatter.test.py .motif_qc_formatter.test.py .tss_gtf.test.sh' EXIT
+trap 'rm -rf -- "${tmp_dir:?}" .fragment_pairs.test.awk .filtered_flags.test.awk .multiqc_aggregate.test.py .library_qc_formatter.test.py .motif_qc_formatter.test.py .qc_dashboard_preprocess.test.py .tss_gtf.test.sh' EXIT
 mkdir -p "$tmp_dir/direct"
 
 cat > "$tmp_dir/direct/name_sorted.sam" <<'EOF'
@@ -641,6 +659,81 @@ grep -F $'chrMini\t10\t11\ttss_1\t0\t+' \
   "$tmp_dir/tss/strand_test.tss.bed" >/dev/null
 grep -F $'chrMini\t49\t50\ttss_2\t0\t-' \
   "$tmp_dir/tss/strand_test.tss.bed" >/dev/null
+
+dashboard_fixture="$tmp_dir/dashboard_preprocess"
+mkdir -p \
+  "$dashboard_fixture/dashboard_inputs/ame/results01/ame" \
+  "$dashboard_fixture/dashboard_inputs/ame/results02/ame" \
+  "$dashboard_fixture/dashboard_inputs/ame_status/statuses01" \
+  "$dashboard_fixture/dashboard_inputs/ame_status/statuses02" \
+  "$dashboard_fixture/dashboard_inputs/motif/metrics01" \
+  "$dashboard_fixture/dashboard_inputs/motif/metrics02" \
+  "$dashboard_fixture/dashboard_inputs/normalized_ame" \
+  "$dashboard_fixture/dashboard_inputs/normalized_motif"
+cat > "$dashboard_fixture/sample_metadata.json" <<'EOF'
+[
+  {"sample_id": "TARGET_A", "is_control": false},
+  {"sample_id": "TARGET_B", "is_control": false}
+]
+EOF
+for index in 01 02; do
+  printf 'rank\tmotif_ID\tmotif_Alt_ID\tp-value\tE-value\tpos\tneg\n' \
+    > "$dashboard_fixture/dashboard_inputs/ame/results${index}/ame/ame.tsv"
+done
+printf 'status\tcomputed\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses01/ame_status.tsv"
+printf 'status\tno_peaks\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+printf 'sample_id\texpected_motif_status\nTARGET_A\tpass\n' \
+  > "$dashboard_fixture/dashboard_inputs/motif/metrics01/TARGET_A.motif_qc.tsv"
+printf 'sample_id\texpected_motif_status\nTARGET_B\tno_peaks\n' \
+  > "$dashboard_fixture/dashboard_inputs/motif/metrics02/TARGET_B.motif_qc.tsv"
+(
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py"
+)
+grep -F $'TARGET_A\tpass\tcomputed' \
+  "$dashboard_fixture/dashboard_inputs/normalized_motif/TARGET_A.motif_qc.tsv" \
+  >/dev/null
+grep -F $'TARGET_B\tno_peaks\tno_peaks' \
+  "$dashboard_fixture/dashboard_inputs/normalized_motif/TARGET_B.motif_qc.tsv" \
+  >/dev/null
+printf '"status"\tcomputed\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+if (
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py" \
+    > "$tmp_dir/quoted-ame-status.log" 2>&1
+); then
+  printf 'FAIL: quoted AME status unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'AME status must be exactly status followed by computed or no_peaks' \
+  "$tmp_dir/quoted-ame-status.log" >/dev/null
+printf 'status\tcomputed\r\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+if (
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py" \
+    > "$tmp_dir/crlf-ame-status.log" 2>&1
+); then
+  printf 'FAIL: CRLF AME status unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'AME status must be exactly status followed by computed or no_peaks' \
+  "$tmp_dir/crlf-ame-status.log" >/dev/null
+printf 'status\tunsupported\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+if (
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py" \
+    > "$tmp_dir/bad-ame-status.log" 2>&1
+); then
+  printf 'FAIL: unsupported AME status unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'AME status must be exactly status followed by computed or no_peaks' \
+  "$tmp_dir/bad-ame-status.log" >/dev/null
 
 if ! command -v nextflow >/dev/null 2>&1; then
   printf '%s\n' \
