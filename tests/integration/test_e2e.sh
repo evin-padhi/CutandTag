@@ -79,12 +79,13 @@ checks = {
             main,
             re.S,
         ),
-    "QC call matches its nine-input contract":
+    "QC call matches its eleven-input contract":
         re.search(
             r"QC\(\s*ALIGN_QC\.out\.filtered_bam,\s*"
             r"PEAKS\.out\.final_broad_peaks,\s*ALIGN_QC\.out\.coverage,\s*"
             r"ALIGN_QC\.out\.metrics,\s*DEMULTIPLEX\.out\.metrics,\s*"
-            r"DEMULTIPLEX\.out\.fastqc,\s*motif_metrics_ch,\s*gtf_ch,\s*tss_bed_ch\s*\)",
+            r"DEMULTIPLEX\.out\.fastqc,\s*motif_metrics_ch,\s*gtf_ch,\s*"
+            r"tss_bed_ch,\s*motif_ame_results_ch,\s*motif_ame_status_ch\s*\)",
             main,
             re.S,
         ),
@@ -268,8 +269,90 @@ second_trace="$tmp_dir/resume.trace.txt"
 python3 - "$runtime_dir/results" <<'PY'
 import csv
 import json
+import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
+
+
+class DashboardHTMLParser(HTMLParser):
+    """Reject external dashboard resources after HTMLParser normalizes markup."""
+
+    URL_ATTRIBUTES = {
+        "src", "href", "data", "poster", "srcset", "background", "action",
+        "formaction", "xlink:href",
+    }
+    EXTERNAL_CONTAINER_TAGS = {
+        "iframe", "object", "embed", "audio", "video", "source", "track",
+    }
+    CSS_EXTERNAL_REFERENCE = re.compile(r"url\s*\(|@import\b", re.I)
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.errors = []
+        self._style_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag in self.EXTERNAL_CONTAINER_TAGS:
+            self.errors.append(f"external container <{tag}>")
+        for name, value in attributes.items():
+            if name in self.URL_ATTRIBUTES and value is not None and value.strip():
+                self.errors.append(f"URL-bearing {name}")
+        style = attributes.get("style")
+        if style is not None and self.CSS_EXTERNAL_REFERENCE.search(style):
+            self.errors.append("CSS external reference")
+        if tag == "style":
+            self._style_depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if tag == "style" and self._style_depth:
+            self._style_depth -= 1
+
+    def handle_data(self, data):
+        if self._style_depth and self.CSS_EXTERNAL_REFERENCE.search(data):
+            self.errors.append("CSS external reference")
+
+
+def assert_self_contained_dashboard(html_text):
+    if re.search(r"https?://", html_text, re.I):
+        raise AssertionError("dashboard contains an HTTP(S) URL")
+    parser = DashboardHTMLParser()
+    parser.feed(html_text)
+    parser.close()
+    if parser.errors:
+        raise AssertionError(
+            "dashboard contains external resource references: "
+            + ", ".join(parser.errors)
+        )
+
+
+for label, malicious_html in {
+    "HTTP URL": '<ScRiPt SrC=" HTTP://cdn.example/dashboard.js"></ScRiPt>',
+    "protocol-relative URL": '<img src="//cdn.example/chart.png">',
+    "stylesheet": '<link rel="stylesheet" href="theme.css">',
+    "image": '<img src="chart.png">',
+    "inline CSS": '<div style="background: URL ( chart.png )"></div>',
+    "style CSS": '<style>body { background: url(chart.png) }</style>',
+    "iframe": '<iframe src="dashboard-frame.html"></iframe>',
+    "object data": '<object data="chart.svg"></object>',
+    "embed": '<embed src="chart.svg">',
+    "audio": '<audio src="signal.mp3"></audio>',
+    "video": '<video src="signal.mp4"></video>',
+    "source": '<source src="signal.webm">',
+    "track": '<track src="captions.vtt">',
+    "CSS import": '<style>@import "theme.css";</style>',
+}.items():
+    try:
+        assert_self_contained_dashboard(malicious_html)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"dashboard self-contained checker accepted {label}")
 
 results = Path(sys.argv[1])
 required_nonempty = [
@@ -282,6 +365,11 @@ required_nonempty = [
     results / "motifs/MINI_CTCF/expected_motif_qc/expected_motif_qc.tsv",
     results / "reports/summary/combined_target_qc.tsv",
     results / "reports/multiqc/multiqc_report.html",
+    results / "reports/qc_dashboard/qc_dashboard.html",
+    results / "reports/qc_dashboard/qc_summary.tsv",
+    results / "reports/qc_dashboard/qc_summary.json",
+    results / "reports/qc_dashboard/top_motifs.tsv",
+    results / "reports/qc_dashboard/tss_profiles.tsv",
     results / "pipeline_info/software_versions.yml",
     results / "pipeline_info/validated_parameters.json",
     results / "pipeline_info/run_summary.txt",
@@ -316,6 +404,51 @@ with (
         for row in csv.DictReader(handle, delimiter="\t")
     }
 assert motif_metrics["status"] == "pass"
+
+with (results / "reports/qc_dashboard/qc_summary.tsv").open(
+    newline="", encoding="utf-8"
+) as handle:
+    summary_rows = list(csv.DictReader(handle, delimiter="\t"))
+with (results / "reports/qc_dashboard/qc_summary.json").open(
+    encoding="utf-8"
+) as handle:
+    json_payload = json.load(handle)
+with (results / "reports/qc_dashboard/top_motifs.tsv").open(
+    newline="", encoding="utf-8"
+) as handle:
+    top_motif_rows = list(csv.DictReader(handle, delimiter="\t"))
+with (results / "reports/qc_dashboard/tss_profiles.tsv").open(
+    newline="", encoding="utf-8"
+) as handle:
+    tss_rows = list(csv.DictReader(handle, delimiter="\t"))
+dashboard_html = (results / "reports/qc_dashboard/qc_dashboard.html").read_text(
+    encoding="utf-8"
+)
+dashboard_dir = results / "reports/qc_dashboard"
+expected_dashboard_files = {
+    "qc_dashboard.html",
+    "qc_summary.tsv",
+    "qc_summary.json",
+    "top_motifs.tsv",
+    "tss_profiles.tsv",
+}
+
+assert {row["sample_id"] for row in summary_rows} == {"MINI_IgG", "MINI_CTCF"}
+ctcf = next(row for row in summary_rows if row["sample_id"] == "MINI_CTCF")
+igg = next(row for row in summary_rows if row["sample_id"] == "MINI_IgG")
+assert float(ctcf["frip"]) > 0
+assert float(ctcf["tss_enrichment"]) == 6.0
+assert ctcf["is_control"] == "false"
+assert igg["is_control"] == "true"
+assert igg["frip"] == ""
+assert igg["expected_motif_status"] == "not_applicable_control"
+assert json_payload["schema_version"] == 1
+assert len(top_motif_rows) == 1
+assert top_motif_rows[0]["motif_alt_id"] == "CTCF"
+assert len(tss_rows) == 1200
+assert {path.name for path in dashboard_dir.iterdir()} == expected_dashboard_files
+assert all(path.is_file() and path.stat().st_size > 0 for path in dashboard_dir.iterdir())
+assert_self_contained_dashboard(dashboard_html)
 PY
 
 (
@@ -383,6 +516,8 @@ expected_process_types = {
     "DEMUX_QC_CUSTOM",
     "LIBRARY_QC_CUSTOM",
     "MOTIF_QC_CUSTOM",
+    "TSS_ENRICHMENT",
+    "QC_DASHBOARD",
     "MULTIQC",
     "WRITE_PIPELINE_PARAMETERS",
     "COLLECT_VERSIONS",
@@ -425,6 +560,8 @@ if resumed_cached != first_tasks:
         "FAIL: resumed cached task set differs from first completed task set; "
         f"missing={dict(missing)} extra={dict(extra)}"
     )
+if not any(process_type(name) == "QC_DASHBOARD" for name in resumed_cached):
+    raise SystemExit("FAIL: resumed run did not cache QC_DASHBOARD")
 PY
 
 printf '%s\n' \

@@ -74,6 +74,8 @@ def version(tool: str) -> bool:
             "bowtie2": "bowtie2-align-s version 2.5.4",
             "samtools": "samtools 1.20",
             "bamCoverage": "bamCoverage 3.5.5",
+            "computeMatrix": "computeMatrix 3.5.5",
+            "plotProfile": "plotProfile 3.5.5",
             "macs2": "macs2 2.2.9.1",
             "bedtools": "bedtools v2.31.1",
             "ame": "5.5.7",
@@ -217,6 +219,39 @@ def fake_bamcoverage(args: list[str]) -> None:
     Path(argument_value(args, "--outFileName")).write_text("fake bigWig\n")
 
 
+def fake_compute_matrix(args: list[str]) -> None:
+    matrix_path = Path(argument_value(args, "--outFileName"))
+    matrix_table_path = Path(argument_value(args, "--outFileNameMatrix"))
+    matrix_path.parent.mkdir(parents=True, exist_ok=True)
+    matrix_table_path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(matrix_path, "wt", encoding="utf-8") as handle:
+        handle.write("fake deepTools matrix\n")
+    matrix_table_path.write_text("fake deepTools matrix table\n", encoding="utf-8")
+
+
+def fake_plot_profile(args: list[str]) -> None:
+    profile_path = Path(argument_value(args, "--outFileName"))
+    profile_table_path = Path(argument_value(args, "--outFileNameData"))
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_table_path.parent.mkdir(parents=True, exist_ok=True)
+    values = ["4"] * 600
+    values[:10] = ["2"] * 10
+    values[-10:] = ["2"] * 10
+    values[300] = "12"
+    labels = [""] * 600
+    labels[0] = "-3.0Kb"
+    labels[299] = "TSS"
+    labels[599] = "3.0Kb"
+    bins = [str(index) for index in range(1, 601)]
+    profile_path.write_text("fake PNG placeholder\n", encoding="utf-8")
+    profile_table_path.write_text(
+        "bin labels\t\t" + "\t".join(labels) + "\n"
+        "bins\t\t" + "\t".join(bins) + "\n"
+        "coverage.RPKM\tgenes\t" + "\t".join(values) + "\n",
+        encoding="utf-8",
+    )
+
+
 def fake_macs2(args: list[str]) -> None:
     if not args or args[0] != "callpeak":
         raise SystemExit("fake macs2 supports only callpeak")
@@ -285,9 +320,7 @@ def fake_bedtools(args: list[str]) -> None:
 
 
 def fake_ame(args: list[str]) -> None:
-    outdir = Path(argument_value(args, "--oc"))
-    outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / "ame.tsv").write_text(
+    sys.stdout.write(
         "rank\tmotif_ID\tmotif_Alt_ID\tp-value\tadj_p-value\tpos\tneg\tenrichment\n"
         "1\tMA0139.1\tCTCF\t0.001\t0.01\t1\t1\t5.0\n"
     )
@@ -332,6 +365,8 @@ def main() -> None:
         "bowtie2": fake_bowtie2,
         "samtools": fake_samtools,
         "bamCoverage": fake_bamcoverage,
+        "computeMatrix": fake_compute_matrix,
+        "plotProfile": fake_plot_profile,
         "macs2": fake_macs2,
         "bedtools": fake_bedtools,
         "ame": fake_ame,

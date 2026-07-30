@@ -10,6 +10,7 @@ required_files=(
   modules/local/peak_qc.nf
   modules/local/tss_enrichment.nf
   modules/local/multiqc.nf
+  modules/local/qc_dashboard.nf
   subworkflows/local/qc.nf
 )
 
@@ -22,6 +23,8 @@ done
 
 python3 - <<'PY'
 from pathlib import Path
+import codecs
+import json
 import re
 
 root = Path.cwd()
@@ -30,7 +33,9 @@ filtered_bam_qc = (root / "modules/local/filtered_bam_qc.nf").read_text()
 peak_qc = (root / "modules/local/peak_qc.nf").read_text()
 tss = (root / "modules/local/tss_enrichment.nf").read_text()
 multiqc = (root / "modules/local/multiqc.nf").read_text()
+qc_dashboard = (root / "modules/local/qc_dashboard.nf").read_text()
 qc = (root / "subworkflows/local/qc.nf").read_text()
+motifs = (root / "subworkflows/local/motifs.nf").read_text()
 
 samtools_image = "quay.io/biocontainers/samtools:1.20--h50ea8bc_0"
 deeptools_image = "quay.io/biocontainers/deeptools:3.5.5--pyhdfd78af_0"
@@ -120,7 +125,9 @@ checks = {
     "deepTools computes a reference-point TSS matrix and profile":
         "computeMatrix reference-point" in tss
         and "--referencePoint TSS" in tss
-        and "plotProfile" in tss,
+        and "plotProfile" in tss
+        and '--outFileNameData "${outputStem}.tss_profile.tsv"' in tss
+        and 'path("*.tss_profile.tsv")' in tss,
     "MULTIQC and custom-content formatter processes are declared":
         all(name in multiqc for name in (
             "process DEMUX_QC_CUSTOM",
@@ -202,6 +209,38 @@ checks = {
             "{ DEMUX_QC_CUSTOM; LIBRARY_QC_CUSTOM; "
             "MOTIF_QC_CUSTOM; MULTIQC }"
         ) in qc,
+    "QC subworkflow includes and invokes the consolidated dashboard":
+        "include { QC_DASHBOARD } from '../../modules/local/qc_dashboard'" in qc
+        and "QC_DASHBOARD(" in qc,
+    "QC subworkflow exposes consolidated dashboard report artifacts":
+        "qc_dashboard_report = QC_DASHBOARD.out.report" in qc
+        and "qc_summary_tsv = QC_DASHBOARD.out.summary_tsv" in qc,
+    "motif subworkflow exposes AME results and statuses":
+        "known_motifs = AME.out.results" in motifs
+        and "known_motif_statuses = AME.out.status" in motifs,
+    "AME dashboard inputs retain explicit sample identity through staging":
+        "val ame_result_sample_ids" in qc_dashboard
+        and "val ame_status_sample_ids" in qc_dashboard
+        and "ame_result_sample_ids," in qc
+        and "ame_status_sample_ids," in qc
+        and "AME result sample_ids do not match target metadata" in qc_dashboard
+        and "AME status sample_ids do not match target metadata" in qc_dashboard,
+    "AME stage ordinals are validated and numerically ordered":
+        "def staged_tables(" in qc_dashboard
+        and "ordinals must be contiguous from 1" in qc_dashboard
+        and '"AME result"' in qc_dashboard
+        and '"AME status"' in qc_dashboard,
+    "dashboard receives explicit motif-analysis intent and generator version":
+        '--motif-analysis-status "${motifAnalysisStatus}"' in qc_dashboard
+        and "qc_dashboard.py: 1.0.0" in qc_dashboard,
+    "dashboard atomically builds outside the live Nextflow task directory":
+        '--outdir "dashboard_bundle"' in qc_dashboard
+        and '"dashboard_bundle/qc_dashboard.html"' in qc_dashboard
+        and 'rmdir "dashboard_bundle"' in qc_dashboard
+        and '--outdir "."' not in qc_dashboard,
+    "QC rejects control AME artifacts before dashboard staging":
+        "IgG control ${safeMeta.sample_id} cannot have an AME result" in qc
+        and "IgG control ${safeMeta.sample_id} cannot have an AME status" in qc,
     "QC validates control metadata and excludes IgG from default FRiP":
         "is_control must be a boolean" in qc
         and "!meta.is_control" in qc
@@ -216,6 +255,8 @@ checks = {
         and "annotation_mode != 'none'" in qc,
     "TSS BED takes precedence over GTF when both are present":
         "tss_rows ? 'bed'" in qc,
+    "TSS profile tuple retains the profile-data table":
+        "meta, bed, matrix, matrixTable, profile, profileTable, status" in qc,
     "IgG and target library metrics both feed the report":
         "FILTERED_BAM_QC(safe_filtered_bams)" in qc
         and "LIBRARY_QC_CUSTOM(library_qc_inputs)" in qc,
@@ -300,6 +341,34 @@ if not motif_formatter:
 (Path.cwd() / ".motif_qc_formatter.test.py").write_text(
     motif_formatter.group(1).replace("\\\\", "\\") + "\n"
 )
+dashboard_preprocessor = re.search(
+    r"python <<'PY'\n(.*?)\nPY",
+    qc_dashboard,
+    re.DOTALL,
+)
+if not dashboard_preprocessor:
+    raise SystemExit("FAIL: could not extract QC dashboard preprocessor")
+dashboard_template = dashboard_preprocessor.group(1)
+dashboard_source = dashboard_template.replace(
+    "${resultSampleIdsJson}", '["TARGET_A", "TARGET_B"]'
+).replace(
+    "${statusSampleIdsJson}", '["TARGET_A", "TARGET_B"]'
+)
+dashboard_source = codecs.decode(dashboard_source, "unicode_escape")
+(Path.cwd() / ".qc_dashboard_preprocess.test.py").write_text(
+    dashboard_source + "\n"
+)
+large_sample_ids = [f"TARGET_{index:03d}" for index in range(1, 102)]
+large_ids_json = json.dumps(large_sample_ids, separators=(",", ":"))
+large_dashboard_source = dashboard_template.replace(
+    "${resultSampleIdsJson}", large_ids_json
+).replace(
+    "${statusSampleIdsJson}", large_ids_json
+)
+large_dashboard_source = codecs.decode(large_dashboard_source, "unicode_escape")
+(Path.cwd() / ".qc_dashboard_preprocess_large.test.py").write_text(
+    large_dashboard_source + "\n"
+)
 gtf_prepare = re.search(
     r"def prepareTss = annotation_mode == 'gtf' \? '''\n(.*?)\n    ''' : '''",
     tss,
@@ -315,7 +384,7 @@ if not gtf_prepare:
 PY
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/nanocut-qc.XXXXXX")
-trap 'rm -rf -- "${tmp_dir:?}" .fragment_pairs.test.awk .filtered_flags.test.awk .multiqc_aggregate.test.py .library_qc_formatter.test.py .motif_qc_formatter.test.py .tss_gtf.test.sh' EXIT
+trap 'rm -rf -- "${tmp_dir:?}" .fragment_pairs.test.awk .filtered_flags.test.awk .multiqc_aggregate.test.py .library_qc_formatter.test.py .motif_qc_formatter.test.py .qc_dashboard_preprocess.test.py .qc_dashboard_preprocess_large.test.py .tss_gtf.test.sh' EXIT
 mkdir -p "$tmp_dir/direct"
 
 cat > "$tmp_dir/direct/name_sorted.sam" <<'EOF'
@@ -616,6 +685,185 @@ grep -F $'chrMini\t10\t11\ttss_1\t0\t+' \
 grep -F $'chrMini\t49\t50\ttss_2\t0\t-' \
   "$tmp_dir/tss/strand_test.tss.bed" >/dev/null
 
+dashboard_fixture="$tmp_dir/dashboard_preprocess"
+mkdir -p \
+  "$dashboard_fixture/dashboard_inputs/ame/results01/ame" \
+  "$dashboard_fixture/dashboard_inputs/ame/results02/ame" \
+  "$dashboard_fixture/dashboard_inputs/ame_status/statuses01" \
+  "$dashboard_fixture/dashboard_inputs/ame_status/statuses02" \
+  "$dashboard_fixture/dashboard_inputs/motif/metrics01" \
+  "$dashboard_fixture/dashboard_inputs/motif/metrics02" \
+  "$dashboard_fixture/dashboard_inputs/normalized_ame" \
+  "$dashboard_fixture/dashboard_inputs/normalized_motif"
+cat > "$dashboard_fixture/sample_metadata.json" <<'EOF'
+[
+  {"sample_id": "TARGET_A", "is_control": false},
+  {"sample_id": "TARGET_B", "is_control": false}
+]
+EOF
+for index in 01 02; do
+  printf 'rank\tmotif_ID\tmotif_Alt_ID\tp-value\tE-value\tpos\tneg\n' \
+    > "$dashboard_fixture/dashboard_inputs/ame/results${index}/ame/ame.tsv"
+done
+printf 'status\tcomputed\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses01/ame_status.tsv"
+printf 'status\tno_peaks\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+printf 'sample_id\texpected_motif_status\nTARGET_A\tpass\n' \
+  > "$dashboard_fixture/dashboard_inputs/motif/metrics01/TARGET_A.motif_qc.tsv"
+printf 'sample_id\texpected_motif_status\nTARGET_B\tno_peaks\n' \
+  > "$dashboard_fixture/dashboard_inputs/motif/metrics02/TARGET_B.motif_qc.tsv"
+(
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py"
+)
+grep -F $'TARGET_A\tpass\tcomputed' \
+  "$dashboard_fixture/dashboard_inputs/normalized_motif/TARGET_A.motif_qc.tsv" \
+  >/dev/null
+grep -F $'TARGET_B\tno_peaks\tno_peaks' \
+  "$dashboard_fixture/dashboard_inputs/normalized_motif/TARGET_B.motif_qc.tsv" \
+  >/dev/null
+printf '"status"\tcomputed\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+if (
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py" \
+    > "$tmp_dir/quoted-ame-status.log" 2>&1
+); then
+  printf 'FAIL: quoted AME status unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'AME status must be exactly status followed by computed or no_peaks' \
+  "$tmp_dir/quoted-ame-status.log" >/dev/null
+printf 'status\tcomputed\r\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+if (
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py" \
+    > "$tmp_dir/crlf-ame-status.log" 2>&1
+); then
+  printf 'FAIL: CRLF AME status unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'AME status must be exactly status followed by computed or no_peaks' \
+  "$tmp_dir/crlf-ame-status.log" >/dev/null
+printf 'status\tunsupported\n' \
+  > "$dashboard_fixture/dashboard_inputs/ame_status/statuses02/ame_status.tsv"
+if (
+  cd "$dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess.test.py" \
+    > "$tmp_dir/bad-ame-status.log" 2>&1
+); then
+  printf 'FAIL: unsupported AME status unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'AME status must be exactly status followed by computed or no_peaks' \
+  "$tmp_dir/bad-ame-status.log" >/dev/null
+
+large_dashboard_fixture="$tmp_dir/dashboard_preprocess_large"
+python3 - "$large_dashboard_fixture" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sample_ids = [f"TARGET_{index:03d}" for index in range(1, 102)]
+(root / "sample_metadata.json").parent.mkdir(parents=True, exist_ok=True)
+for directory in (
+    root / "dashboard_inputs" / "normalized_ame",
+    root / "dashboard_inputs" / "normalized_motif",
+):
+    directory.mkdir(parents=True, exist_ok=True)
+(root / "sample_metadata.json").write_text(
+    json.dumps([
+        {"sample_id": sample_id, "is_control": False}
+        for sample_id in sample_ids
+    ]),
+    encoding="utf-8",
+)
+for ordinal, sample_id in enumerate(sample_ids, start=1):
+    stage = f"{ordinal:02d}"
+    result = root / "dashboard_inputs" / "ame" / f"results{stage}" / "ame"
+    status = root / "dashboard_inputs" / "ame_status" / f"statuses{stage}"
+    motif = root / "dashboard_inputs" / "motif" / f"metrics{stage}"
+    result.mkdir(parents=True)
+    status.mkdir(parents=True)
+    motif.mkdir(parents=True)
+    (result / "ame.tsv").write_text(
+        "rank\tmotif_ID\tmotif_Alt_ID\tp-value\tE-value\tpos\tneg\n"
+        f"1\tMOTIF_{ordinal:03d}\tALT_{ordinal:03d}\t0.001\t0.01\t1\t1\n",
+        encoding="utf-8",
+    )
+    expected_status = "computed" if ordinal % 2 else "no_peaks"
+    (status / "ame_status.tsv").write_text(
+        f"status\t{expected_status}\n",
+        encoding="utf-8",
+    )
+    with (motif / f"{sample_id}.motif_qc.tsv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["sample_id", "expected_motif_status"],
+            delimiter="\t",
+        )
+        writer.writeheader()
+        writer.writerow({
+            "sample_id": sample_id,
+            "expected_motif_status": "pass",
+        })
+PY
+(
+  cd "$large_dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess_large.test.py"
+)
+python3 - "$large_dashboard_fixture" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for ordinal in range(1, 102):
+    sample_id = f"TARGET_{ordinal:03d}"
+    ame = (
+        root / "dashboard_inputs" / "normalized_ame"
+        / sample_id / "ame" / "ame.tsv"
+    )
+    with ame.open(encoding="utf-8", newline="") as handle:
+        row = next(csv.DictReader(handle, delimiter="\t"))
+    assert row["motif_ID"] == f"MOTIF_{ordinal:03d}", (
+        sample_id, row["motif_ID"]
+    )
+    motif = (
+        root / "dashboard_inputs" / "normalized_motif"
+        / f"{sample_id}.motif_qc.tsv"
+    )
+    with motif.open(encoding="utf-8", newline="") as handle:
+        motif_row = next(csv.DictReader(handle, delimiter="\t"))
+    expected_status = "computed" if ordinal % 2 else "no_peaks"
+    assert motif_row["ame_status"] == expected_status, (
+        sample_id, motif_row["ame_status"]
+    )
+PY
+rm -rf \
+  "$large_dashboard_fixture/dashboard_inputs/ame/results50" \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_ame" \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_motif"
+mkdir -p \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_ame" \
+  "$large_dashboard_fixture/dashboard_inputs/normalized_motif"
+if (
+  cd "$large_dashboard_fixture"
+  python3 "$repo_root/.qc_dashboard_preprocess_large.test.py" \
+    > "$tmp_dir/missing-ame-ordinal.log" 2>&1
+); then
+  printf 'FAIL: missing AME staged ordinal unexpectedly accepted\n' >&2
+  exit 1
+fi
+grep -F 'staged AME result ordinals must be contiguous from 1' \
+  "$tmp_dir/missing-ame-ordinal.log" >/dev/null
+
 if ! command -v nextflow >/dev/null 2>&1; then
   printf '%s\n' \
     'SKIP: Nextflow runtime unavailable; strong static checks and direct mate-flag/FRiP/empty-peak/library-metrics/motif/TSS/summary checks passed, but no DSL2 execution was run.'
@@ -707,7 +955,7 @@ for sample in IgG TARGET; do
 done
 
 cat > "$tmp_dir/runtime/input/demux.json" <<'EOF'
-{"total_reads": 4, "assigned_reads": 4, "ambiguous_reads": 0, "unassigned_reads": 0, "assigned_fraction": 1.0, "ambiguous_fraction": 0.0, "unassigned_fraction": 0.0}
+{"total_reads": 4, "assigned_reads": 4, "ambiguous_reads": 0, "unassigned_reads": 0, "assigned_fraction": 1.0, "ambiguous_fraction": 0.0, "unassigned_fraction": 0.0, "assignment_counts": {"IgG": 2, "TARGET": 2}}
 EOF
 printf 'metric\tvalue\ntotal_reads\t4\nassigned_fraction\t1.0\n' \
   > "$tmp_dir/runtime/input/demux.tsv"
@@ -748,7 +996,15 @@ workflow {
     )
     library_metrics = Channel.of(
         tuple(
-            [sample_id: 'IgG', is_control: true],
+            [
+                sample_id: 'IgG',
+                library_id: 'LIB',
+                input_group: 'group1',
+                assay_target: 'IgG',
+                is_control: true,
+                control_id: null,
+                expected_motif: null
+            ],
             file('${tmp_dir}/runtime/input/IgG.flagstat.txt'),
             file('${tmp_dir}/runtime/input/IgG.stats.txt'),
             file('${tmp_dir}/runtime/input/IgG.idxstats.tsv'),
@@ -756,7 +1012,15 @@ workflow {
             file('${tmp_dir}/runtime/input/IgG.duplicate_metrics.json')
         ),
         tuple(
-            [sample_id: 'TARGET', is_control: false],
+            [
+                sample_id: 'TARGET',
+                library_id: 'LIB',
+                input_group: 'group1',
+                assay_target: 'CTCF',
+                is_control: false,
+                control_id: 'IgG',
+                expected_motif: 'CTCF'
+            ],
             file('${tmp_dir}/runtime/input/TARGET.flagstat.txt'),
             file('${tmp_dir}/runtime/input/TARGET.stats.txt'),
             file('${tmp_dir}/runtime/input/TARGET.idxstats.tsv'),
@@ -784,6 +1048,8 @@ workflow {
                 file('${tmp_dir}/runtime/input/TARGET.motif_qc.tsv')
             )
         ),
+        Channel.empty(),
+        Channel.empty(),
         Channel.empty(),
         Channel.empty()
     )
