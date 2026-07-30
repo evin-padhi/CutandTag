@@ -79,12 +79,13 @@ checks = {
             main,
             re.S,
         ),
-    "QC call matches its nine-input contract":
+    "QC call matches its eleven-input contract":
         re.search(
             r"QC\(\s*ALIGN_QC\.out\.filtered_bam,\s*"
             r"PEAKS\.out\.final_broad_peaks,\s*ALIGN_QC\.out\.coverage,\s*"
             r"ALIGN_QC\.out\.metrics,\s*DEMULTIPLEX\.out\.metrics,\s*"
-            r"DEMULTIPLEX\.out\.fastqc,\s*motif_metrics_ch,\s*gtf_ch,\s*tss_bed_ch\s*\)",
+            r"DEMULTIPLEX\.out\.fastqc,\s*motif_metrics_ch,\s*gtf_ch,\s*"
+            r"tss_bed_ch,\s*motif_ame_results_ch,\s*motif_ame_status_ch\s*\)",
             main,
             re.S,
         ),

@@ -10,6 +10,7 @@ required_files=(
   modules/local/peak_qc.nf
   modules/local/tss_enrichment.nf
   modules/local/multiqc.nf
+  modules/local/qc_dashboard.nf
   subworkflows/local/qc.nf
 )
 
@@ -30,7 +31,9 @@ filtered_bam_qc = (root / "modules/local/filtered_bam_qc.nf").read_text()
 peak_qc = (root / "modules/local/peak_qc.nf").read_text()
 tss = (root / "modules/local/tss_enrichment.nf").read_text()
 multiqc = (root / "modules/local/multiqc.nf").read_text()
+qc_dashboard = (root / "modules/local/qc_dashboard.nf").read_text()
 qc = (root / "subworkflows/local/qc.nf").read_text()
+motifs = (root / "subworkflows/local/motifs.nf").read_text()
 
 samtools_image = "quay.io/biocontainers/samtools:1.20--h50ea8bc_0"
 deeptools_image = "quay.io/biocontainers/deeptools:3.5.5--pyhdfd78af_0"
@@ -204,6 +207,25 @@ checks = {
             "{ DEMUX_QC_CUSTOM; LIBRARY_QC_CUSTOM; "
             "MOTIF_QC_CUSTOM; MULTIQC }"
         ) in qc,
+    "QC subworkflow includes and invokes the consolidated dashboard":
+        "include { QC_DASHBOARD } from '../../modules/local/qc_dashboard'" in qc
+        and "QC_DASHBOARD(" in qc,
+    "QC subworkflow exposes consolidated dashboard report artifacts":
+        "qc_dashboard_report = QC_DASHBOARD.out.report" in qc
+        and "qc_summary_tsv = QC_DASHBOARD.out.summary_tsv" in qc,
+    "motif subworkflow exposes AME results and statuses":
+        "known_motifs = AME.out.results" in motifs
+        and "known_motif_statuses = AME.out.status" in motifs,
+    "AME dashboard inputs retain explicit sample identity through staging":
+        "val ame_result_sample_ids" in qc_dashboard
+        and "val ame_status_sample_ids" in qc_dashboard
+        and "ame_result_sample_ids," in qc
+        and "ame_status_sample_ids," in qc
+        and "AME result sample_ids do not match target metadata" in qc_dashboard
+        and "AME status sample_ids do not match target metadata" in qc_dashboard,
+    "QC rejects control AME artifacts before dashboard staging":
+        "IgG control ${safeMeta.sample_id} cannot have an AME result" in qc
+        and "IgG control ${safeMeta.sample_id} cannot have an AME status" in qc,
     "QC validates control metadata and excludes IgG from default FRiP":
         "is_control must be a boolean" in qc
         and "!meta.is_control" in qc
@@ -711,7 +733,7 @@ for sample in IgG TARGET; do
 done
 
 cat > "$tmp_dir/runtime/input/demux.json" <<'EOF'
-{"total_reads": 4, "assigned_reads": 4, "ambiguous_reads": 0, "unassigned_reads": 0, "assigned_fraction": 1.0, "ambiguous_fraction": 0.0, "unassigned_fraction": 0.0}
+{"total_reads": 4, "assigned_reads": 4, "ambiguous_reads": 0, "unassigned_reads": 0, "assigned_fraction": 1.0, "ambiguous_fraction": 0.0, "unassigned_fraction": 0.0, "assignment_counts": {"IgG": 2, "TARGET": 2}}
 EOF
 printf 'metric\tvalue\ntotal_reads\t4\nassigned_fraction\t1.0\n' \
   > "$tmp_dir/runtime/input/demux.tsv"
@@ -752,7 +774,15 @@ workflow {
     )
     library_metrics = Channel.of(
         tuple(
-            [sample_id: 'IgG', is_control: true],
+            [
+                sample_id: 'IgG',
+                library_id: 'LIB',
+                input_group: 'group1',
+                assay_target: 'IgG',
+                is_control: true,
+                control_id: null,
+                expected_motif: null
+            ],
             file('${tmp_dir}/runtime/input/IgG.flagstat.txt'),
             file('${tmp_dir}/runtime/input/IgG.stats.txt'),
             file('${tmp_dir}/runtime/input/IgG.idxstats.tsv'),
@@ -760,7 +790,15 @@ workflow {
             file('${tmp_dir}/runtime/input/IgG.duplicate_metrics.json')
         ),
         tuple(
-            [sample_id: 'TARGET', is_control: false],
+            [
+                sample_id: 'TARGET',
+                library_id: 'LIB',
+                input_group: 'group1',
+                assay_target: 'CTCF',
+                is_control: false,
+                control_id: 'IgG',
+                expected_motif: 'CTCF'
+            ],
             file('${tmp_dir}/runtime/input/TARGET.flagstat.txt'),
             file('${tmp_dir}/runtime/input/TARGET.stats.txt'),
             file('${tmp_dir}/runtime/input/TARGET.idxstats.tsv'),
@@ -788,6 +826,8 @@ workflow {
                 file('${tmp_dir}/runtime/input/TARGET.motif_qc.tsv')
             )
         ),
+        Channel.empty(),
+        Channel.empty(),
         Channel.empty(),
         Channel.empty()
     )
