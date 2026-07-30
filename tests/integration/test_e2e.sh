@@ -283,6 +283,11 @@ required_nonempty = [
     results / "motifs/MINI_CTCF/expected_motif_qc/expected_motif_qc.tsv",
     results / "reports/summary/combined_target_qc.tsv",
     results / "reports/multiqc/multiqc_report.html",
+    results / "reports/qc_dashboard/qc_dashboard.html",
+    results / "reports/qc_dashboard/qc_summary.tsv",
+    results / "reports/qc_dashboard/qc_summary.json",
+    results / "reports/qc_dashboard/top_motifs.tsv",
+    results / "reports/qc_dashboard/tss_profiles.tsv",
     results / "pipeline_info/software_versions.yml",
     results / "pipeline_info/validated_parameters.json",
     results / "pipeline_info/run_summary.txt",
@@ -317,6 +322,40 @@ with (
         for row in csv.DictReader(handle, delimiter="\t")
     }
 assert motif_metrics["status"] == "pass"
+
+with (results / "reports/qc_dashboard/qc_summary.tsv").open(
+    newline="", encoding="utf-8"
+) as handle:
+    summary_rows = list(csv.DictReader(handle, delimiter="\t"))
+with (results / "reports/qc_dashboard/qc_summary.json").open(
+    encoding="utf-8"
+) as handle:
+    json_payload = json.load(handle)
+with (results / "reports/qc_dashboard/top_motifs.tsv").open(
+    newline="", encoding="utf-8"
+) as handle:
+    top_motif_rows = list(csv.DictReader(handle, delimiter="\t"))
+with (results / "reports/qc_dashboard/tss_profiles.tsv").open(
+    newline="", encoding="utf-8"
+) as handle:
+    tss_rows = list(csv.DictReader(handle, delimiter="\t"))
+dashboard_html = (results / "reports/qc_dashboard/qc_dashboard.html").read_text(
+    encoding="utf-8"
+)
+
+assert {row["sample_id"] for row in summary_rows} == {"MINI_IgG", "MINI_CTCF"}
+ctcf = next(row for row in summary_rows if row["sample_id"] == "MINI_CTCF")
+igg = next(row for row in summary_rows if row["sample_id"] == "MINI_IgG")
+assert float(ctcf["frip"]) > 0
+assert float(ctcf["tss_enrichment"]) == 6.0
+assert igg["is_control"] == "true"
+assert igg["frip"] == ""
+assert igg["expected_motif_status"] == "not_applicable_control"
+assert json_payload["schema_version"] == 1
+assert len(top_motif_rows) == 1
+assert top_motif_rows[0]["motif_alt_id"] == "CTCF"
+assert len(tss_rows) == 1200
+assert "https://" not in dashboard_html
 PY
 
 (
@@ -384,6 +423,8 @@ expected_process_types = {
     "DEMUX_QC_CUSTOM",
     "LIBRARY_QC_CUSTOM",
     "MOTIF_QC_CUSTOM",
+    "TSS_ENRICHMENT",
+    "QC_DASHBOARD",
     "MULTIQC",
     "WRITE_PIPELINE_PARAMETERS",
     "COLLECT_VERSIONS",
@@ -426,6 +467,8 @@ if resumed_cached != first_tasks:
         "FAIL: resumed cached task set differs from first completed task set; "
         f"missing={dict(missing)} extra={dict(extra)}"
     )
+if not any(process_type(name) == "QC_DASHBOARD" for name in resumed_cached):
+    raise SystemExit("FAIL: resumed run did not cache QC_DASHBOARD")
 PY
 
 printf '%s\n' \

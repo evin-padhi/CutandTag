@@ -262,6 +262,7 @@ results/
   qc/tss/<sample_id>/
   motifs/<sample_id>/
   reports/multiqc/
+  reports/qc_dashboard/
   reports/summary/
   pipeline_info/
 ```
@@ -285,9 +286,15 @@ results/
 - `motifs/` contains foreground/background intervals and FASTAs, AME known
   enrichment, STREME de novo discovery, FIMO scans, status/log files, and
   `expected_motif_qc` JSON/TSV/position outputs.
-- `reports/multiqc/multiqc_report.html` is the top-level report.
-  `reports/summary/combined_target_qc.tsv` is the combined target broad-peak
-  summary.
+- `reports/multiqc/multiqc_report.html` remains the MultiQC report.
+  `reports/qc_dashboard/qc_dashboard.html` is the detailed, self-contained
+  consolidated QC dashboard. It has no external `https://` dependencies and
+  is safe to copy with a results directory.
+- `reports/qc_dashboard/qc_summary.tsv` and `qc_summary.json` are reusable,
+  joined per-sample data products. `top_motifs.tsv` is the reusable top-ten AME
+  motif summary and `tss_profiles.tsv` is the reusable TSS scalar/profile data
+  product. `reports/summary/combined_target_qc.tsv` remains the combined target
+  broad-peak summary.
 - `pipeline_info/` contains the normalized manifest, validated parameter JSON,
   software versions, completion summary, built index when applicable,
   execution report, timeline, trace, and DAG.
@@ -322,16 +329,20 @@ peak-called against themselves and do not receive target FRiP by default.
   properly paired fragments from the filtered BAM overlapping at least one
   final (blacklist-filtered when applicable) broad peak. The denominator is
   all unique properly paired fragments in that filtered BAM. A fragment is
-  counted once even if both mates or multiple peaks overlap.
+  counted once even if both mates or multiple peaks overlap. The original FRiP
+  value remains at `qc/peaks/<sample_id>/<sample_id>.peak_qc.tsv`, in row
+  `frip`; the dashboard summary joins that source with the other QC products.
 - **Peak QC:** includes count, union-covered bases, width min/mean/median/max
   and quartiles, width histogram, MACS2 score/signal summaries, and
   fragment-per-peak counts. These describe the final broad peaks.
 - **TSS enrichment:** when `--tss_bed` or `--gtf` is supplied, deepTools builds
   a strand-aware matrix from 3 kb upstream to 3 kb downstream in 10-bp bins
-  and emits the matrix and aggregate profile. The current output records the
-  computed/skipped status and profile; it does not reduce that curve to a
-  single scalar TSS-enrichment score. Without annotation it records
+  and emits the matrix and aggregate profile. The dashboard's scalar TSS
+  enrichment is position 0 divided by the mean first/last 100 bp, and the full
+  curve is retained in `tss_profiles.tsv`. Without annotation it records
   `skipped_no_annotation`.
+
+IgG controls are visually separated from targets in the dashboard. Controls have no expected-motif result, because expected motifs apply only to target libraries. When optional outputs are unavailable, the dashboard presents NA warnings rather than zero so absence is not mistaken for a measured value. The dashboard is descriptive and applies no biological thresholds; establish project-specific interpretation before making biological classifications.
 
 These metrics are descriptive QC, not universal pass/fail thresholds. Compare
 targets with matched controls and comparable input groups, and establish

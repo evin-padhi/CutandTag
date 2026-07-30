@@ -144,6 +144,18 @@ required_phrases = [
     "JASPAR",
     "-resume",
     "Nextflow runtime execution was not verified in this workspace",
+    "reports/multiqc/multiqc_report.html",
+    "reports/qc_dashboard/qc_dashboard.html",
+    "qc_summary.tsv",
+    "qc_summary.json",
+    "top_motifs.tsv",
+    "tss_profiles.tsv",
+    "qc/peaks/<sample_id>/<sample_id>.peak_qc.tsv",
+    "position 0 divided by the mean first/last 100 bp",
+    "visually separated",
+    "no expected-motif result",
+    "NA warnings rather than zero",
+    "applies no biological thresholds",
 ]
 missing_phrases = [phrase for phrase in required_phrases if phrase not in readme]
 if missing_phrases:

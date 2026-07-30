@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Added a self-contained consolidated QC dashboard with joined per-sample TSV
+  and JSON summaries, a TSS scalar and profile export, and a top-ten AME motif
+  summary. These reports are descriptive data products and do not make
+  biological classifications.
+
 ## 0.1.0 — 2026-07-23
 
 - Added strict CSV manifest validation and synchronized streaming I2
