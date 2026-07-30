@@ -740,6 +740,160 @@ class TssAndAmeTests(unittest.TestCase):
             {"motif_id", "motif_alt_id", "adjusted_p_value", "p_value", "effect", "positive_sequences", "rank"},
         )
 
+    def test_read_all_ame_retains_rows_beyond_top_ten(self):
+        """The heatmap needs the complete AME result while legacy exports stay bounded."""
+        workspace = self.make_workspace()
+        path = workspace / "ame.tsv"
+        rows = [
+            "rank\tmotif_ID\tmotif_Alt_ID\tadj_p-value\tp-value\tscore\tpos",
+            "1\t__NO_PEAKS__\t__NO_PEAKS__\t0\t0\t0\t0",
+        ]
+        rows.extend(
+            f"{rank}\tM{rank:02d}\tmotif-{rank:02d}\t{rank / 1000}\t"
+            f"{rank / 100}\t2\t4"
+            for rank in range(1, 13)
+        )
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+        all_records = qc.read_all_ame(path)
+        top_records = qc.read_top_ame(path)
+
+        self.assertEqual(len(all_records), 12)
+        self.assertEqual(len(top_records), 10)
+        self.assertEqual(
+            [row["motif_id"] for row in top_records],
+            [row["motif_id"] for row in all_records[:10]],
+        )
+        self.assertNotIn("__NO_PEAKS__", [row["motif_id"] for row in all_records])
+
+    def test_cognate_matching_uses_complete_case_insensitive_tokens(self):
+        """Punctuation-delimited TF names match, but longer symbols do not."""
+        self.assertTrue(qc.is_cognate_motif("GATA1", "MA0140.2", "GATA1::TAL1"))
+        self.assertTrue(qc.is_cognate_motif("GATA1", "TAL1::gata1", "complex"))
+        self.assertFalse(qc.is_cognate_motif("GATA1", "MA9999", "GATA10"))
+
+    def test_ame_directory_load_keeps_complete_internal_and_bounded_public_records(self):
+        """A single AME read supplies both heatmap data and the legacy top-ten export."""
+        workspace = self.make_workspace()
+        path = workspace / "S1" / "ame" / "ame.tsv"
+        path.parent.mkdir(parents=True)
+        rows = [
+            "rank\tmotif_ID\tmotif_Alt_ID\tadj_p-value\tp-value\tscore\tpos",
+        ]
+        rows.extend(
+            f"{rank}\tM{rank:02d}\tmotif-{rank:02d}\t{rank / 1000}\t"
+            f"{rank / 100}\t2\t4"
+            for rank in range(1, 13)
+        )
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+        all_motifs, top_motifs = qc._read_ame_motifs_from_directory(workspace)
+        data = qc.build_report_data(
+            {
+                "S1": {
+                    "sample_id": "S1", "library_id": "L1",
+                    "assay_target": "GATA1", "is_control": False,
+                    "input_group": None, "control_id": None,
+                    "expected_motif": "GATA1",
+                },
+            },
+            {}, {}, {}, {}, {}, top_motifs,
+            annotation_status="skipped_no_annotation",
+            ame_motifs=all_motifs,
+            motif_analysis_status="computed",
+        )
+
+        self.assertEqual(len(data["samples_by_id"]["S1"]["ame_motifs"]), 12)
+        self.assertEqual(len(data["samples_by_id"]["S1"]["top_motifs"]), 10)
+        public_sample = qc._json_payload(data)["samples"][0]
+        self.assertNotIn("ame_motifs", public_sample)
+        self.assertEqual(len(public_sample["top_motifs"]), 10)
+
+    def test_build_motif_heatmap_selects_targets_cognates_and_top_noncognates(self):
+        """The cohort matrix excludes controls and bounds only noncognate rows."""
+        noncognate = [
+            {
+                "motif_id": f"MA_OTHER_{index:02d}",
+                "motif_alt_id": f"OTHER{index:02d}",
+                "adjusted_p_value": 0.01 + index / 1000 if index < 12 else None,
+            }
+            for index in range(17)
+        ]
+        gata_records = [
+            {
+                "motif_id": "MA_GATA1", "motif_alt_id": "GATA1::TAL1",
+                "adjusted_p_value": 0.001,
+            },
+            {
+                "motif_id": "MA_GATA10", "motif_alt_id": "GATA10",
+                "adjusted_p_value": 0.15,
+            },
+            {
+                "motif_id": "MA_ZERO", "motif_alt_id": "ZERO",
+                "adjusted_p_value": 0,
+            },
+            {
+                "motif_id": "MA_NS", "motif_alt_id": "NS",
+                "adjusted_p_value": 0.2,
+            },
+            *noncognate,
+        ]
+        samples = [
+            {
+                "sample_id": "GATA_sample", "expected_motif": "GATA1",
+                "is_control": False, "ame_motifs": gata_records,
+            },
+            {
+                "sample_id": "CTCF_sample", "expected_motif": "CTCF",
+                "is_control": False,
+                "ame_motifs": [{
+                    "motif_id": "MA_CTCF", "motif_alt_id": "CTCF",
+                    "adjusted_p_value": None,
+                }],
+            },
+            {
+                "sample_id": "IgG_sample", "expected_motif": None,
+                "is_control": True, "ame_motifs": gata_records,
+            },
+        ]
+
+        matrix = qc.build_motif_heatmap(samples)
+
+        self.assertNotIn("IgG_sample", matrix["sample_ids"])
+        self.assertEqual(matrix["sample_ids"], ["CTCF_sample", "GATA_sample"])
+        self.assertIn(("MA_GATA1", "GATA1::TAL1"), matrix["motif_keys"])
+        self.assertNotIn(
+            ("MA_GATA10", "GATA10"), matrix["forced_cognate_keys"]
+        )
+        self.assertEqual(len(matrix["noncognate_keys"]), 15)
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", ("MA_ZERO", "ZERO"))]["score"],
+            60.0,
+        )
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", ("MA_ZERO", "ZERO"))]["label"],
+            ">60",
+        )
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", ("MA_NS", "NS"))]["label"],
+            "ns",
+        )
+        self.assertEqual(
+            matrix["cells"][
+                ("GATA_sample", ("MA_GATA1", "GATA1::TAL1"))
+            ]["score"],
+            3.0,
+        )
+        self.assertEqual(
+            matrix["cells"][("CTCF_sample", ("MA_CTCF", "CTCF"))]["label"],
+            "ns",
+        )
+        self.assertTrue(
+            matrix["cells"][
+                ("GATA_sample", ("MA_GATA1", "GATA1::TAL1"))
+            ]["outlined"]
+        )
+
 
 class ReportDataTests(unittest.TestCase):
     def test_build_report_data_joins_target_and_preserves_control_optional_gaps(self):

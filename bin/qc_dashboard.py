@@ -10,6 +10,7 @@ import html
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import tempfile
@@ -667,32 +668,169 @@ def calculate_tss_enrichment(
     return _tss_enrichment_result(profile, flank_bp=flank_bp)[0]
 
 
-def read_top_ame(path: Path, *, limit: int = TOP_MOTIF_LIMIT) -> list[dict[str, object]]:
-    """Return up to ``limit`` AME records in deterministic significance order."""
-    if limit < 0:
-        raise DashboardInputError("AME motif limit must be non-negative")
+def _ame_record_dict(record: object) -> dict[str, object]:
+    """Serialize one parsed AME record for dashboard data structures."""
+    return {
+        "motif_id": record.motif_id,
+        "motif_alt_id": record.motif_alt_id,
+        "adjusted_p_value": record.adjusted_p_value,
+        "p_value": record.p_value,
+        "effect": record.effect,
+        "positive_sequences": record.positive_sequences,
+        "rank": record.rank,
+    }
+
+
+def read_all_ame(path: Path) -> list[dict[str, object]]:
+    """Return all usable AME records in deterministic significance order."""
     try:
         records = read_ame(path)
     except ValueError as error:
         raise DashboardInputError(str(error)) from error
-    top = [record for record in records if record.motif_id != "__NO_PEAKS__"]
-    top.sort(key=lambda record: (
+    usable = [record for record in records if record.motif_id != "__NO_PEAKS__"]
+    usable.sort(key=lambda record: (
         record.adjusted_p_value,
         record.rank if record.rank is not None else math.inf,
         record.motif_id,
+        record.motif_alt_id,
     ))
-    return [
-        {
-            "motif_id": record.motif_id,
-            "motif_alt_id": record.motif_alt_id,
-            "adjusted_p_value": record.adjusted_p_value,
-            "p_value": record.p_value,
-            "effect": record.effect,
-            "positive_sequences": record.positive_sequences,
-            "rank": record.rank,
-        }
-        for record in top[:limit]
-    ]
+    return [_ame_record_dict(record) for record in usable]
+
+
+def read_top_ame(path: Path, *, limit: int = TOP_MOTIF_LIMIT) -> list[dict[str, object]]:
+    """Return up to ``limit`` AME records in deterministic significance order."""
+    if limit < 0:
+        raise DashboardInputError("AME motif limit must be non-negative")
+    return read_all_ame(path)[:limit]
+
+
+def motif_tokens(*values: object) -> frozenset[str]:
+    """Return punctuation-delimited, case-insensitive motif tokens."""
+    return frozenset(
+        token
+        for value in values
+        if value is not None
+        for token in re.findall(r"[A-Za-z0-9]+", str(value).casefold())
+    )
+
+
+def is_cognate_motif(
+    expected_motif: object, motif_id: object, motif_alt_id: object
+) -> bool:
+    """Return whether the expected TF occurs as a complete motif token."""
+    expected_tokens = motif_tokens(expected_motif)
+    return bool(expected_tokens & motif_tokens(motif_id, motif_alt_id))
+
+
+def build_motif_heatmap(
+    samples: Sequence[Mapping[str, object]],
+    *,
+    noncognate_limit: int = 15,
+    significance_cap: float = 60.0,
+) -> dict[str, object]:
+    """Build a deterministic target-only AME significance matrix."""
+    targets = sorted(
+        (sample for sample in samples if not bool(sample.get("is_control"))),
+        key=lambda sample: str(sample.get("sample_id", "")),
+    )
+    sample_ids = [str(sample.get("sample_id", "")) for sample in targets]
+    records_by_sample: dict[
+        str, dict[tuple[str, str], Mapping[str, object]]
+    ] = {}
+    key_records: dict[tuple[str, str], list[Mapping[str, object]]] = {}
+    cognate_groups: dict[tuple[str, str], str] = {}
+
+    for sample in targets:
+        sample_id = str(sample.get("sample_id", ""))
+        expected = sample.get("expected_motif")
+        sample_records: dict[tuple[str, str], Mapping[str, object]] = {}
+        raw_records = sample.get("ame_motifs", [])
+        if not isinstance(raw_records, Sequence) or isinstance(
+            raw_records, (str, bytes)
+        ):
+            raw_records = []
+        for record in raw_records:
+            if not isinstance(record, Mapping):
+                continue
+            key = (
+                str(record.get("motif_id") or ""),
+                str(record.get("motif_alt_id") or ""),
+            )
+            sample_records[key] = record
+            key_records.setdefault(key, []).append(record)
+            if is_cognate_motif(expected, *key):
+                group = str(expected or "").casefold()
+                current = cognate_groups.get(key)
+                if current is None or group < current:
+                    cognate_groups[key] = group
+        records_by_sample[sample_id] = sample_records
+
+    forced_cognate_keys = sorted(
+        cognate_groups,
+        key=lambda key: (
+            cognate_groups[key],
+            key[1].casefold(),
+            key[0].casefold(),
+            key,
+        ),
+    )
+
+    def best_adjusted(key: tuple[str, str]) -> float:
+        values = []
+        for record in key_records[key]:
+            value = record.get("adjusted_p_value")
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                values.append(float(value))
+        return min(values) if values else math.inf
+
+    noncognate_keys = sorted(
+        (key for key in key_records if key not in cognate_groups),
+        key=lambda key: (
+            best_adjusted(key),
+            key[1].casefold(),
+            key[0].casefold(),
+            key,
+        ),
+    )[:noncognate_limit]
+    motif_keys = [*forced_cognate_keys, *noncognate_keys]
+    cells: dict[tuple[str, tuple[str, str]], dict[str, object]] = {}
+    for sample in targets:
+        sample_id = str(sample.get("sample_id", ""))
+        expected = sample.get("expected_motif")
+        for key in motif_keys:
+            record = records_by_sample[sample_id].get(key)
+            adjusted = (
+                record.get("adjusted_p_value")
+                if isinstance(record, Mapping) else None
+            )
+            significant = (
+                isinstance(adjusted, (int, float))
+                and math.isfinite(float(adjusted))
+                and 0 <= float(adjusted) <= 0.1
+            )
+            if significant and float(adjusted) == 0:
+                score = significance_cap
+                label = f">{format(significance_cap, 'g')}"
+            elif significant:
+                score = min(-math.log10(float(adjusted)), significance_cap)
+                label = format(score, ".3g")
+            else:
+                score = 0.0
+                label = "ns"
+            cells[(sample_id, key)] = {
+                "score": score,
+                "label": label,
+                "adjusted_p_value": adjusted,
+                "outlined": is_cognate_motif(expected, *key),
+            }
+
+    return {
+        "sample_ids": sample_ids,
+        "motif_keys": motif_keys,
+        "forced_cognate_keys": forced_cognate_keys,
+        "noncognate_keys": noncognate_keys,
+        "cells": cells,
+    }
 
 
 def _family_state(status: str, reason: str | None = None) -> dict[str, object]:
@@ -726,6 +864,7 @@ def _empty_sample(record: Mapping[str, object]) -> dict[str, object]:
             family: _family_state("missing", "not_evaluated")
             for family in FAMILY_NAMES
         },
+        "ame_motifs": [],
         "top_motifs": [],
         "warnings": [],
     }
@@ -808,6 +947,7 @@ def build_report_data(
     fragments_per_peak: (
         Mapping[str, Sequence[Mapping[str, object]]] | None
     ) = None,
+    ame_motifs: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     motif_analysis_status: str = "auto",
 ) -> dict[str, object]:
     """Initialize optional QC families, then overlay validated sample metrics."""
@@ -817,7 +957,7 @@ def build_report_data(
         raise DashboardInputError(f"unsupported annotation status {annotation_status}")
     if motif_analysis_status == "auto":
         motif_analysis_status = (
-            "computed" if motifs or top_motifs else "skipped_no_database"
+            "computed" if motifs or top_motifs or ame_motifs else "skipped_no_database"
         )
     if motif_analysis_status not in {"computed", "skipped_no_database"}:
         raise DashboardInputError(
@@ -826,13 +966,15 @@ def build_report_data(
     insert_sizes = {} if insert_sizes is None else insert_sizes
     peak_widths = {} if peak_widths is None else peak_widths
     fragments_per_peak = {} if fragments_per_peak is None else fragments_per_peak
+    ame_motifs = {} if ame_motifs is None else ame_motifs
     samples_by_id = {sample_id: _empty_sample(record) for sample_id, record in metadata.items()}
     sample_ids = set(samples_by_id)
     for family_name, family in (("library", libraries), ("peak", peaks), ("tss", tss),
                                 ("motif", motifs), ("top motifs", top_motifs),
                                 ("insert-size", insert_sizes),
                                 ("peak-width", peak_widths),
-                                ("fragments-per-peak", fragments_per_peak)):
+                                ("fragments-per-peak", fragments_per_peak),
+                                ("AME motifs", ame_motifs)):
         unknown = sorted(set(family) - sample_ids)
         if unknown:
             raise DashboardInputError(f"{family_name} metrics reference unknown sample_id {unknown[0]}")
@@ -1030,6 +1172,9 @@ def build_report_data(
                 )
             sample["top_motifs"] = [
                 dict(item) for item in top_motifs.get(sample_id, ())
+            ]
+            sample["ame_motifs"] = [
+                dict(item) for item in ame_motifs.get(sample_id, ())
             ]
     samples = [samples_by_id[sample_id] for sample_id in sorted(samples_by_id)]
     warnings = [warning for sample in samples for warning in sample["warnings"]]
@@ -2087,14 +2232,30 @@ def _sample_id_for_ame(path: Path) -> str:
     return path.parent.parent.name if path.parent.name == "ame" else path.parent.name
 
 
-def _read_top_motifs_from_directory(directory: Path) -> dict[str, list[dict[str, object]]]:
-    records: dict[str, list[dict[str, object]]] = {}
+def _read_ame_motifs_from_directory(
+    directory: Path,
+) -> tuple[
+    dict[str, list[dict[str, object]]],
+    dict[str, list[dict[str, object]]],
+]:
+    """Read each AME result once and return complete and bounded mappings."""
+    complete: dict[str, list[dict[str, object]]] = {}
     for path in _input_paths(directory, "ame.tsv", label="AME"):
         sample_id = _sample_id_for_ame(path)
-        if not sample_id or sample_id in records:
+        if not sample_id or sample_id in complete:
             raise DashboardInputError(f"duplicate AME sample_id {sample_id}")
-        records[sample_id] = read_top_ame(path)
-    return dict(sorted(records.items()))
+        complete[sample_id] = read_all_ame(path)
+    complete = dict(sorted(complete.items()))
+    top = {
+        sample_id: records[:TOP_MOTIF_LIMIT]
+        for sample_id, records in complete.items()
+    }
+    return complete, top
+
+
+def _read_top_motifs_from_directory(directory: Path) -> dict[str, list[dict[str, object]]]:
+    """Compatibility wrapper returning the bounded AME mapping."""
+    return _read_ame_motifs_from_directory(directory)[1]
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -2153,13 +2314,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         motifs = _read_motif_metrics(
             _input_paths(args.motif_dir, "*.motif_qc.tsv", label="motif")
         )
-        top_motifs = _read_top_motifs_from_directory(args.ame_dir)
+        ame_motifs, top_motifs = _read_ame_motifs_from_directory(args.ame_dir)
         data = build_report_data(
             metadata, demultiplex, libraries, peaks, tss, motifs, top_motifs,
             annotation_status=args.annotation_status,
             insert_sizes=insert_sizes,
             peak_widths=peak_widths,
             fragments_per_peak=fragments_per_peak,
+            ame_motifs=ame_motifs,
             motif_analysis_status=args.motif_analysis_status,
         )
         write_outputs_atomically(data, args.outdir)
