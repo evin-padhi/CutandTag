@@ -287,7 +287,7 @@ PY
     cat > "qc_dashboard_versions.yml" <<'EOF'
 QC_DASHBOARD:
   python: Python 3.12.3
-  qc_dashboard.py: 1.0.0
+  qc_dashboard.py: 1.1.0
 EOF
     """
 }

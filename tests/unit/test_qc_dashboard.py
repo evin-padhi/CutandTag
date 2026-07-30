@@ -1371,7 +1371,7 @@ class DashboardOutputTests(unittest.TestCase):
             },
         )
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["generator_version"], "1.0.0")
+        self.assertEqual(payload["generator_version"], "1.1.0")
         self.assertEqual(
             payload["counts"],
             {"samples": 2, "targets": 1, "controls": 1, "warnings": 3},
@@ -1464,10 +1464,10 @@ class DashboardOutputTests(unittest.TestCase):
         dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
         self.assertIn("Insert-size distribution", dashboard)
         self.assertIn(">[0, 250)<", dashboard)
-        self.assertIn(">23<", dashboard)
+        self.assertIn(">23.0<", dashboard)
         self.assertIn("Peak-width distribution", dashboard)
         self.assertIn(">[250, 500)<", dashboard)
-        self.assertIn(">7<", dashboard)
+        self.assertIn(">7.00<", dashboard)
 
     def test_dashboard_bins_insert_and_peak_width_distributions_across_samples(self):
         data = self.report_data()
@@ -1782,6 +1782,75 @@ class DashboardOutputTests(unittest.TestCase):
             ".table-scroll{max-width:100%;overflow-x:auto}",
             html,
         )
+
+    def test_dashboard_rounds_only_html_and_collapses_detailed_tables(self):
+        """Presentation compaction must not alter exact identifiers or raw exports."""
+        workspace = self.make_workspace()
+        data = self.report_data()
+        target = data["samples_by_id"]["Z_TARGET"]
+        target["demultiplex"].update({
+            "assigned_read_pairs": 17_432_100,
+            "assigned_fraction": 0.012345,
+        })
+        target["library"]["insert_size_distribution"] = [
+            {"insert_size": 260, "pair_count": 17_432_100},
+        ]
+        target["availability"]["insert_size"] = {
+            "status": "computed", "reason": None,
+        }
+
+        qc.write_outputs(data, workspace)
+
+        dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn(">17.4M<", dashboard)
+        self.assertIn(">0.0123<", dashboard)
+        self.assertIn("<details", dashboard)
+        self.assertIn(
+            "<summary>View binned insert-size data</summary>",
+            dashboard,
+        )
+        self.assertNotIn("<details open", dashboard)
+        self.assertIn(">Z_TARGET<", dashboard)
+        self.assertIn(">1<", dashboard)
+        self.assertIn(">[250, 500)<", dashboard)
+
+        with (workspace / "qc_summary.tsv").open(
+            encoding="utf-8", newline=""
+        ) as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        raw_target = next(row for row in rows if row["sample_id"] == "Z_TARGET")
+        self.assertEqual(raw_target["assigned_read_pairs"], "17432100")
+        self.assertEqual(raw_target["assigned_fraction"], "0.012345")
+
+        payload = json.loads(
+            (workspace / "qc_summary.json").read_text(encoding="utf-8")
+        )
+        json_target = next(
+            row for row in payload["samples"]
+            if row["sample_id"] == "Z_TARGET"
+        )
+        self.assertEqual(
+            json_target["demultiplex"]["assigned_read_pairs"],
+            17_432_100,
+        )
+        self.assertEqual(
+            json_target["demultiplex"]["assigned_fraction"],
+            0.012345,
+        )
+
+    def test_dashboard_version_and_responsive_layout_metadata(self):
+        """The redesigned HTML and producer record must identify version 1.1.0."""
+        dashboard_module = (
+            Path(__file__).parents[2] / "modules/local/qc_dashboard.nf"
+        ).read_text(encoding="utf-8")
+        rendered = qc.render_dashboard(self.report_data())
+
+        self.assertEqual(qc.SCHEMA_VERSION, 1)
+        self.assertEqual(qc.GENERATOR_VERSION, "1.1.0")
+        self.assertIn("qc_dashboard.py: 1.1.0", dashboard_module)
+        self.assertIn(".panel-grid{", rendered)
+        self.assertIn("@media (max-width:", rendered)
+        self.assertIn("@media print{", rendered)
 
     def test_dashboard_tables_have_unique_context_specific_accessible_names(self):
         """Assistive technology must distinguish every scrollable data region."""

@@ -15,7 +15,7 @@ import shutil
 import statistics
 import tempfile
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Collection, Mapping, Sequence
 
 from motif_qc import read_ame
 from qc_dashboard_visuals import (
@@ -35,7 +35,7 @@ from qc_dashboard_visuals import (
 
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "1.0.0"
+GENERATOR_VERSION = "1.1.0"
 TSS_BEFORE_BP = 3000
 TSS_BIN_SIZE = 10
 TSS_FLANK_BP = 100
@@ -1674,7 +1674,8 @@ def write_tss_profiles_tsv(data: Mapping[str, object], path: Path) -> None:
 
 
 def render_table(
-    columns, rows, *, empty_message, aria_label, row_limit: int | None = None
+    columns, rows, *, empty_message, aria_label, row_limit: int | None = None,
+    exact_keys: Collection[str] = (),
 ):
     """Render an escaped HTML table, including an explicit empty-state message."""
     all_rows = list(rows)
@@ -1685,7 +1686,11 @@ def render_table(
     body = "".join(
         "<tr>"
         + "".join(
-            f"<td>{html.escape(format_value(row.get(key)))}</td>"
+            "<td>"
+            + html.escape(
+                format_significant(row.get(key), exact=key in exact_keys)
+            )
+            + "</td>"
             for key, _ in columns
         )
         + "</tr>"
@@ -1705,6 +1710,18 @@ def render_table(
             "</p>"
         )
     return table
+
+
+def render_data_details(
+    title: str, content: str, *, open_by_default: bool = False
+) -> str:
+    """Collapse a detailed data region without removing it from the document."""
+    open_attribute = " open" if open_by_default else ""
+    return (
+        f'<details class="data-details"{open_attribute}>'
+        f"<summary>{html.escape(title)}</summary>"
+        f"{content}</details>"
+    )
 
 
 def render_bar_chart(
@@ -2067,6 +2084,11 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         [{**sample, "annotation_status": data.get("annotation_status")} for sample in samples],
         empty_message="No samples were supplied",
         aria_label="Run overview table",
+        exact_keys={
+            "sample_id", "library_id", "input_group", "assay_target",
+            "sample_kind", "control_id", "expected_motif",
+            "annotation_status",
+        },
     )
     aggregate_availability = _aggregate_availability(samples)
     availability_rows = [
@@ -2084,6 +2106,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         availability_rows,
         empty_message="No input-family availability was recorded",
         aria_label="Input-family availability table",
+        exact_keys={"family", "status"},
     )
     technical_metrics = (
         BarMetric(
@@ -2130,38 +2153,46 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         'is MAPQ-filtered fragments divided by sample-assigned reads; '
         'undefined denominators are shown as NA.</p>'
     )
-    demux += render_table(
-        [("sample_id", "Sample"), ("total_read_pairs", "Total read pairs"),
-         ("assigned_read_pairs", "Assigned read pairs"),
-         ("ambiguous_read_pairs", "Ambiguous read pairs"),
-         ("unassigned_read_pairs", "Unassigned read pairs"),
-         ("assigned_fraction", "Assigned fraction"),
-         ("ambiguous_fraction", "Ambiguous fraction"),
-         ("unassigned_fraction", "Unassigned fraction"),
-         ("sample_assigned_reads", "Sample assigned reads"),
-         ("sample_assignment_fraction", "Sample assignment fraction")],
-        summary_rows, empty_message="No demultiplexing metrics available",
-        aria_label="Demultiplexing metrics table",
+    demux += render_data_details(
+        "View demultiplexing metrics",
+        render_table(
+            [("sample_id", "Sample"), ("total_read_pairs", "Total read pairs"),
+             ("assigned_read_pairs", "Assigned read pairs"),
+             ("ambiguous_read_pairs", "Ambiguous read pairs"),
+             ("unassigned_read_pairs", "Unassigned read pairs"),
+             ("assigned_fraction", "Assigned fraction"),
+             ("ambiguous_fraction", "Ambiguous fraction"),
+             ("unassigned_fraction", "Unassigned fraction"),
+             ("sample_assigned_reads", "Sample assigned reads"),
+             ("sample_assignment_fraction", "Sample assignment fraction")],
+            summary_rows, empty_message="No demultiplexing metrics available",
+            aria_label="Demultiplexing metrics table",
+            exact_keys={"sample_id"},
+        ),
     )
-    alignment = render_table(
-        [("sample_id", "Sample"), ("raw_total_reads", "Raw reads"),
-         ("mapped_percent", "Mapped (%)"),
-         ("properly_paired_percent", "Properly paired (%)"),
-         ("mapq_filtered_reads", "MAPQ reads"),
-         ("mapq_filtered_fragments", "MAPQ fragments"),
-         ("mapq_filtered_fraction", "MAPQ fraction"),
-         ("markdup_examined_reads", "Examined reads"),
-         ("duplicate_total", "Duplicate reads"),
-         ("duplicate_percent", "Duplicate (%)"),
-         ("mitochondrial_percent", "Mitochondrial (%)"),
-         ("estimated_library_size", "Estimated library size"),
-         ("insert_size_total_pairs", "Insert pairs"),
-         ("insert_size_min", "Insert min"), ("insert_size_q25", "Insert Q25"),
-         ("insert_size_mean", "Insert mean"),
-         ("insert_size_median", "Insert median"),
-         ("insert_size_q75", "Insert Q75"), ("insert_size_max", "Insert max")],
-        summary_rows, empty_message="No alignment metrics available",
-        aria_label="Alignment and library QC table",
+    alignment = render_data_details(
+        "View alignment and library metrics",
+        render_table(
+            [("sample_id", "Sample"), ("raw_total_reads", "Raw reads"),
+             ("mapped_percent", "Mapped (%)"),
+             ("properly_paired_percent", "Properly paired (%)"),
+             ("mapq_filtered_reads", "MAPQ reads"),
+             ("mapq_filtered_fragments", "MAPQ fragments"),
+             ("mapq_filtered_fraction", "MAPQ fraction"),
+             ("markdup_examined_reads", "Examined reads"),
+             ("duplicate_total", "Duplicate reads"),
+             ("duplicate_percent", "Duplicate (%)"),
+             ("mitochondrial_percent", "Mitochondrial (%)"),
+             ("estimated_library_size", "Estimated library size"),
+             ("insert_size_total_pairs", "Insert pairs"),
+             ("insert_size_min", "Insert min"), ("insert_size_q25", "Insert Q25"),
+             ("insert_size_mean", "Insert mean"),
+             ("insert_size_median", "Insert median"),
+             ("insert_size_q75", "Insert Q75"), ("insert_size_max", "Insert max")],
+            summary_rows, empty_message="No alignment metrics available",
+            aria_label="Alignment and library QC table",
+            exact_keys={"sample_id"},
+        ),
     )
     insert_weighted: dict[str, list[tuple[int, int]]] = {}
     for sample in samples:
@@ -2194,12 +2225,17 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         for sample_id, rows in insert_binned.items()
         for row in rows
     ]
-    insert += render_table(
-        [("sample_id", "Sample"), ("bin", "Insert-size bin (bp)"),
-         ("pair_count", "Read pairs"), ("percent", "Percent")],
-        insert_rows, empty_message="No insert-size distribution data available",
-        aria_label="Insert-size distribution table",
-        row_limit=2000,
+    insert += render_data_details(
+        "View binned insert-size data",
+        render_table(
+            [("sample_id", "Sample"), ("bin", "Insert-size bin (bp)"),
+             ("pair_count", "Read pairs"), ("percent", "Percent")],
+            insert_rows,
+            empty_message="No insert-size distribution data available",
+            aria_label="Insert-size distribution table",
+            row_limit=2000,
+            exact_keys={"sample_id", "bin"},
+        ),
     )
     peak_rows = [row for row in summary_rows if not row.get("is_control")]
     peak_grid = render_panel_grid(
@@ -2289,17 +2325,21 @@ def render_dashboard(data: Mapping[str, object]) -> str:
             + ".</p>"
         )
     peaks += fragments_per_peak_panel
-    peaks += render_table(
-        [("sample_id", "Sample"), ("peak_count", "Peak count"),
-         ("total_covered_bases", "Covered bases"),
-         ("peak_width_min", "Width min"), ("peak_width_q25", "Width Q25"),
-         ("peak_width_mean", "Width mean"),
-         ("peak_width_median", "Width median"),
-         ("peak_width_q75", "Width Q75"), ("peak_width_max", "Width max"),
-         ("total_fragments", "Usable fragments"),
-         ("fragments_in_peaks", "Fragments in peaks"), ("frip", "FRiP")],
-        summary_rows, empty_message="No peak metrics available",
-        aria_label="Peaks and FRiP table",
+    peaks += render_data_details(
+        "View peaks and FRiP metrics",
+        render_table(
+            [("sample_id", "Sample"), ("peak_count", "Peak count"),
+             ("total_covered_bases", "Covered bases"),
+             ("peak_width_min", "Width min"), ("peak_width_q25", "Width Q25"),
+             ("peak_width_mean", "Width mean"),
+             ("peak_width_median", "Width median"),
+             ("peak_width_q75", "Width Q75"), ("peak_width_max", "Width max"),
+             ("total_fragments", "Usable fragments"),
+             ("fragments_in_peaks", "Fragments in peaks"), ("frip", "FRiP")],
+            summary_rows, empty_message="No peak metrics available",
+            aria_label="Peaks and FRiP table",
+            exact_keys={"sample_id"},
+        ),
     )
     peak_width_weighted: dict[str, list[tuple[int, int]]] = {}
     for sample in samples:
@@ -2332,12 +2372,17 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         for sample_id, rows in peak_width_binned.items()
         for row in rows
     ]
-    peak_width += render_table(
-        [("sample_id", "Sample"), ("bin", "Peak-width bin (bp)"),
-         ("peak_count", "Peaks"), ("percent", "Percent")],
-        peak_width_rows, empty_message="No peak-width distribution data available",
-        aria_label="Peak-width distribution table",
-        row_limit=2000,
+    peak_width += render_data_details(
+        "View binned peak-width data",
+        render_table(
+            [("sample_id", "Sample"), ("bin", "Peak-width bin (bp)"),
+             ("peak_count", "Peaks"), ("percent", "Percent")],
+            peak_width_rows,
+            empty_message="No peak-width distribution data available",
+            aria_label="Peak-width distribution table",
+            row_limit=2000,
+            exact_keys={"sample_id", "bin"},
+        ),
     )
     profiles = {
         str(sample.get("sample_id", "")): _nested(sample, "tss").get("profile", [])
@@ -2361,38 +2406,61 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         x_axis_label="Position relative to TSS (bp)",
         y_axis_label="Mean coverage (RPKM)",
     )
-    tss += render_table(
-        [("sample_id", "Sample"), ("tss_status", "Status"), ("tss_enrichment", "TSS enrichment")],
-        summary_rows, empty_message="No TSS metrics available",
-        aria_label="TSS enrichment table",
+    tss += render_data_details(
+        "View TSS enrichment data",
+        render_table(
+            [("sample_id", "Sample"), ("tss_status", "Status"),
+             ("tss_enrichment", "TSS enrichment")],
+            summary_rows, empty_message="No TSS metrics available",
+            aria_label="TSS enrichment table",
+            exact_keys={"sample_id", "tss_status"},
+        ),
     )
     motif_rows = _top_motif_rows(data)
     motif_matrix = build_motif_heatmap(samples)
     expected = render_motif_heatmap(motif_matrix)
-    expected += "<h3>Displayed motif cells</h3>" + render_table(
-        [("sample_id", "Sample"), ("motif_id", "Motif"),
-         ("motif_alt_id", "Alternate ID"), ("rank", "Rank"),
-         ("adjusted_p_value", "Adjusted p-value"),
-         ("transformed_significance", "Transformed significance"),
-         ("cognate", "Cognate")],
-        _motif_heatmap_rows(motif_matrix),
-        empty_message="No displayed motif cells available",
-        aria_label="Displayed motif cells table",
+    expected += render_data_details(
+        "View displayed motif cells",
+        render_table(
+            [("sample_id", "Sample"), ("motif_id", "Motif"),
+             ("motif_alt_id", "Alternate ID"), ("rank", "Rank"),
+             ("adjusted_p_value", "Adjusted p-value"),
+             ("transformed_significance", "Transformed significance"),
+             ("cognate", "Cognate")],
+            _motif_heatmap_rows(motif_matrix),
+            empty_message="No displayed motif cells available",
+            aria_label="Displayed motif cells table",
+            exact_keys={
+                "sample_id", "motif_id", "motif_alt_id", "rank", "cognate",
+            },
+        ),
     )
-    expected += "<h3>Expected motif summary</h3>" + render_table(
-        [("sample_id", "Sample"), ("expected_motif", "Expected motif"),
-         ("expected_motif_status", "Expected motif status"),
-         ("best_motif_id", "Best motif"),
-         ("best_adjusted_p_value", "Best adjusted significance"),
-         ("ame_status", "AME status")],
-        peak_rows, empty_message="No target motif metrics available",
-        aria_label="Expected motif table",
+    expected += render_data_details(
+        "View expected motif summary",
+        render_table(
+            [("sample_id", "Sample"), ("expected_motif", "Expected motif"),
+             ("expected_motif_status", "Expected motif status"),
+             ("best_motif_id", "Best motif"),
+             ("best_adjusted_p_value", "Best adjusted significance"),
+             ("ame_status", "AME status")],
+            peak_rows, empty_message="No target motif metrics available",
+            aria_label="Expected motif table",
+            exact_keys={
+                "sample_id", "expected_motif", "expected_motif_status",
+                "best_motif_id", "ame_status",
+            },
+        ),
     )
-    expected += "<h3>Top AME motifs</h3>" + render_table(
-        [("sample_id", "Sample"), ("rank", "Rank"), ("motif_id", "Motif"),
-         ("motif_alt_id", "Alternate ID"), ("adjusted_p_value", "Adjusted p-value")],
-        motif_rows, empty_message="No AME motifs available",
-        aria_label="Top AME motifs table",
+    expected += render_data_details(
+        "View top AME motifs",
+        render_table(
+            [("sample_id", "Sample"), ("rank", "Rank"), ("motif_id", "Motif"),
+             ("motif_alt_id", "Alternate ID"),
+             ("adjusted_p_value", "Adjusted p-value")],
+            motif_rows, empty_message="No AME motifs available",
+            aria_label="Top AME motifs table",
+            exact_keys={"sample_id", "rank", "motif_id", "motif_alt_id"},
+        ),
     )
     warnings = data.get("warnings", [])
     warning_rows = warnings if isinstance(warnings, list) else []
@@ -2401,6 +2469,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
          ("status", "Status"), ("message", "Warning")],
         warning_rows, empty_message="No warnings recorded",
         aria_label="Warnings table",
+        exact_keys={"sample_id", "family", "status", "message"},
     )
     body = "".join((
         _section("run-overview", "Run overview", counts + overview),
@@ -2419,9 +2488,12 @@ def render_dashboard(data: Mapping[str, object]) -> str:
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Consolidated QC dashboard</title><style>
-body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1100px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
-.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.panel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,24rem),1fr));gap:1rem;margin:.75rem 0}.qc-panel{min-width:0;border:1px solid #dbe3ee;border-radius:.4rem;padding:.75rem;background:#fff}.qc-panel h3{font-size:1rem;margin-bottom:.35rem}.panel-scroll{max-width:100%;overflow-x:auto}.panel-chart{display:block;height:auto}.axis-grid{stroke:#dbe3ee;stroke-width:1}.axis-tick-label{fill:#475569;font-size:11px}.axis-title{fill:#334155;font-size:12px}.bar-value,.scatter-label{font-size:11px;font-weight:600}.sample-label{font-size:10px}.range-min-max,.range-iqr,.range-median,.scatter-leader,.scatter-point{vector-effect:non-scaling-stroke}.panel-note,.table-note{color:#475569;font-size:.9rem}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}
-.heatmap-scroll{max-width:100%;overflow-x:auto}.motif-heatmap{display:block;width:auto;min-width:100%;height:auto}.heatmap-cell{stroke:#dbe3ee;stroke-width:1}.heatmap-cell.cognate{stroke:#172033;stroke-width:3}.heatmap-sample-label{font-size:11px;font-weight:700}.heatmap-motif-label{font-size:11px}.heatmap-cell-label{font-size:10px;font-weight:600;pointer-events:none}.heatmap-legend-title,.heatmap-legend-tick{font-size:11px}
+body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1400px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
+.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.panel-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin:.75rem 0}.qc-panel{min-width:0;border:1px solid #dbe3ee;border-radius:.4rem;padding:.75rem;background:#fff}.qc-panel h3{font-size:1rem;margin-bottom:.35rem}.panel-scroll{max-width:100%;overflow-x:auto}.panel-chart{display:block;height:auto}.axis-grid{stroke:#dbe3ee;stroke-width:1}.axis-tick-label{fill:#475569;font-size:11px}.axis-title{fill:#334155;font-size:12px}.bar-value,.scatter-label{font-size:11px;font-weight:600}.sample-label{font-size:10px}.range-min-max,.range-iqr,.range-median,.scatter-leader,.scatter-point{vector-effect:non-scaling-stroke}.panel-note,.table-note{color:#475569;font-size:.9rem}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}
+.heatmap-scroll{max-width:100%;overflow-x:auto}.motif-heatmap{display:block;width:auto;min-width:100%;height:auto}.heatmap-cell{stroke:#dbe3ee;stroke-width:1}.heatmap-cell.cognate{stroke:#172033;stroke-width:3}.heatmap-sample-label{font-size:11px;font-weight:700}.heatmap-motif-label{font-size:11px}.heatmap-cell-label{font-size:10px;font-weight:600;pointer-events:none}.heatmap-legend-title,.heatmap-legend-tick{font-size:11px}.data-details{margin:.75rem 0}.data-details summary{cursor:pointer;font-weight:700}.table-scroll:focus-visible,.panel-scroll:focus-visible,.chart-scroll:focus-visible,.heatmap-scroll:focus-visible,.data-details summary:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
+@media (max-width:900px){.panel-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:640px){main{padding:.75rem}.panel-grid{grid-template-columns:minmax(0,1fr)}section{padding:.75rem}}
+@media print{body{background:#fff}main{max-width:none;padding:0}section,.qc-panel,.data-details{break-inside:avoid;page-break-inside:avoid}.table-scroll,.panel-scroll,.chart-scroll,.heatmap-scroll{overflow:visible}details:not([open])>:not(summary){display:block}.data-details summary{display:none}}
 </style></head><body><main><h1>Consolidated QC dashboard</h1><p>Descriptive technical and biological QC summary; no biological thresholds are applied.</p>""" + body + "</main></body></html>"
 
 
