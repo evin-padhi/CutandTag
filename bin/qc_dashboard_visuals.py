@@ -297,7 +297,7 @@ def render_motif_heatmap(matrix: Mapping[str, object]) -> str:
             cognate = bool(cell.get("outlined"))
             x = row_label_width + column * cell_width
             adjusted_label = (
-                _exact_number(float(adjusted))
+                str(adjusted)
                 if _numeric(adjusted) is not None else "NA"
             )
             accessible_name = (

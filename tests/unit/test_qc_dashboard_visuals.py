@@ -108,7 +108,7 @@ class MotifHeatmapRenderingTests(unittest.TestCase):
                 ("NX704_GATA1", motif_keys[0]): {
                     "score": 0.0,
                     "label": "ns",
-                    "adjusted_p_value": 0.1256789,
+                    "adjusted_p_value": 0.12345678901234566,
                     "outlined": False,
                 },
                 ("NX701_CTCF", motif_keys[1]): {
@@ -157,7 +157,8 @@ class MotifHeatmapRenderingTests(unittest.TestCase):
         self.assertEqual(len(cell_titles), 4)
         self.assertEqual(len(cell_titles), len(set(cell_titles)))
         self.assertIn(
-            "NX704_GATA1; MA0139.1 CTCF; adjusted p-value 0.1256789; "
+            "NX704_GATA1; MA0139.1 CTCF; adjusted p-value "
+            "0.12345678901234566; "
             "−log10 adjusted p-value 0; noncognate",
             cell_titles,
         )
