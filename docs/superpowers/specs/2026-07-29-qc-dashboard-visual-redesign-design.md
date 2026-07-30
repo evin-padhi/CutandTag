@@ -85,6 +85,13 @@ metric:
 Tooltips preserve the unshortened value. A transformed axis must say so in its
 title; the report will never silently plot a logarithm.
 
+Numeric values in visible HTML tables will use three significant digits.
+Large counts may use the same `K`, `M`, or `Mb` suffixes as their plots, and
+very small values may use scientific notation. Sample IDs, motif IDs, ranks,
+integer bin boundaries, and categorical fields remain exact. This is a
+presentation-only transformation: TSV and JSON outputs retain their existing
+full numeric precision.
+
 ## Sequencing and Alignment Panels
 
 The sequencing section will use compact small multiples for:
@@ -121,10 +128,10 @@ They compare distribution shape rather than raw library depth.
 
 ### Insert size
 
-Insert sizes will be aggregated into shared, left-closed 50-bp bins:
+Insert sizes will be aggregated into shared, left-closed 250-bp bins:
 
 ```text
-[0, 50), [50, 100), [100, 150), ...
+[0, 250), [250, 500), [500, 750), ...
 ```
 
 Each bin is normalized to percent of the sample's observed insert-size pairs.
@@ -135,10 +142,18 @@ within-sample percent.
 
 ### Peak width
 
-Peak widths will be rendered as an empirical cumulative distribution function
-(ECDF). The x-axis is logarithmic and labels values in bp/kb; the y-axis is
-cumulative percent of peaks. The plotted table contains only the compact ECDF
-points required to reproduce the SVG.
+Peak widths will be aggregated into the same style of shared, left-closed
+250-bp bins:
+
+```text
+[0, 250), [250, 500), [500, 750), ...
+```
+
+Each bin is normalized to percent of the sample's called peaks. All target
+samples share every bin from zero through the cohort-wide observed maximum,
+including zero-valued bins. The x-axis is linear and labels values in bp/kb.
+The binned HTML table contains sample ID, bin start, bin end, peak count, and
+within-sample percent.
 
 ### Fragments per peak
 
@@ -235,8 +250,9 @@ The implementation will keep data transforms separate from SVG rendering:
 
 - target color and sample-style assignment;
 - compact number and tick formatting;
+- three-significant-digit HTML table formatting;
 - bar-chart geometry and value labeling;
-- 50-bp insert-size binning and normalization;
+- shared 250-bp insert-size and peak-width binning and normalization;
 - ECDF construction and downsampling;
 - endpoint-label packing;
 - motif identity normalization and cognate matching;
@@ -275,9 +291,12 @@ than expanding the page width.
 
 Unit tests will cover:
 
-- exact 50-bp bin boundaries and within-sample percentages;
+- exact 250-bp insert-size and peak-width bin boundaries and within-sample
+  percentages;
 - ECDF monotonicity, endpoints, repeated values, empty inputs, and zero counts;
 - compact-number and tick formatting;
+- three-significant-digit HTML table values without loss of TSV/JSON
+  precision;
 - target-color determinism and control distinctions;
 - endpoint-label separation and plot-bound constraints;
 - token-aware cognate matches and false-positive exclusions;
