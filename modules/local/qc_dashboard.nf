@@ -132,9 +132,15 @@ def staged_tables(root, prefix, filename, label):
         ordinal = int(match.group(1))
         if ordinal in by_ordinal:
             raise SystemExit(f"duplicate staged {label} ordinal {ordinal}")
-        candidates = sorted(
-            path for path in staged.rglob(filename) if path.is_file()
-        )
+        candidates = []
+        for entry in staged.iterdir():
+            if entry.is_file() and entry.name == filename:
+                candidates.append(entry)
+            elif entry.is_dir():
+                candidate = entry / filename
+                if candidate.is_file():
+                    candidates.append(candidate)
+        candidates.sort()
         if len(candidates) != 1:
             raise SystemExit(
                 f"{staged}: staged {label} must contain exactly one {filename}"
