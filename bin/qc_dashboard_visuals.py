@@ -62,8 +62,17 @@ def _three_significant(value: float) -> str:
     if value == 0:
         return "0"
     exponent = math.floor(math.log10(abs(value)))
-    decimals = max(0, 2 - exponent)
-    return f"{value:.{decimals}f}"
+    rounded = round(value, 2 - exponent)
+    rounded_exponent = math.floor(math.log10(abs(rounded)))
+    decimals = max(0, 2 - rounded_exponent)
+    return f"{rounded:.{decimals}f}"
+
+
+def _rounded_to_three_significant(value: float) -> float:
+    if value == 0:
+        return 0.0
+    exponent = math.floor(math.log10(abs(value)))
+    return round(value, 2 - exponent)
 
 
 def format_significant(value: object, *, exact: bool = False, compact: bool = True) -> str:
@@ -86,9 +95,10 @@ def format_significant(value: object, *, exact: bool = False, compact: bool = Tr
     if absolute and absolute < 1e-4:
         return f"{numeric:.2e}"
     if compact:
+        rounded = _rounded_to_three_significant(numeric)
         for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
-            if absolute >= threshold:
-                return f"{_three_significant(numeric / threshold)}{suffix}"
+            if abs(rounded) >= threshold:
+                return f"{_three_significant(rounded / threshold)}{suffix}"
     return _three_significant(numeric)
 
 

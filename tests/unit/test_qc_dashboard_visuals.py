@@ -23,6 +23,11 @@ class VisualFormattingTests(unittest.TestCase):
         self.assertEqual(visuals.format_significant(0.000012345), "1.23e-05")
         self.assertEqual(visuals.format_significant(1250, exact=True), "1250")
 
+    def test_html_numbers_promote_compact_suffixes_after_rounding(self):
+        self.assertEqual(visuals.format_significant(999.9), "1.00K")
+        self.assertEqual(visuals.format_significant(999_500), "1.00M")
+        self.assertEqual(visuals.format_significant(999_500_000), "1.00B")
+
 
 class DistributionTransformTests(unittest.TestCase):
     def test_shared_250bp_bins_include_zero_bins_and_normalize_each_sample(self):
