@@ -269,8 +269,82 @@ second_trace="$tmp_dir/resume.trace.txt"
 python3 - "$runtime_dir/results" <<'PY'
 import csv
 import json
+import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
+
+
+class DashboardHTMLParser(HTMLParser):
+    """Reject external dashboard resources after HTMLParser normalizes markup."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.errors = []
+        self._style_depth = 0
+
+    @staticmethod
+    def is_remote(value):
+        normalized = value.strip().lower()
+        return normalized.startswith(("http://", "https://", "//"))
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "script" and "src" in attributes:
+            self.errors.append("script src")
+        if tag == "link" and "href" in attributes:
+            self.errors.append("link href")
+        if tag == "img" and "src" in attributes:
+            self.errors.append("img src")
+        for name, value in attributes.items():
+            if name.endswith(("src", "href")) and value is not None and self.is_remote(value):
+                self.errors.append(f"remote {name}")
+        style = attributes.get("style")
+        if style is not None and re.search(r"url\s*\(", style, re.I):
+            self.errors.append("CSS url()")
+        if tag == "style":
+            self._style_depth += 1
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if tag == "style" and self._style_depth:
+            self._style_depth -= 1
+
+    def handle_data(self, data):
+        if self._style_depth and re.search(r"url\s*\(", data, re.I):
+            self.errors.append("CSS url()")
+
+
+def assert_self_contained_dashboard(html_text):
+    if re.search(r"https?://", html_text, re.I):
+        raise AssertionError("dashboard contains an HTTP(S) URL")
+    parser = DashboardHTMLParser()
+    parser.feed(html_text)
+    parser.close()
+    if parser.errors:
+        raise AssertionError(
+            "dashboard contains external resource references: "
+            + ", ".join(parser.errors)
+        )
+
+
+for label, malicious_html in {
+    "HTTP URL": '<ScRiPt SrC=" HTTP://cdn.example/dashboard.js"></ScRiPt>',
+    "protocol-relative URL": '<img src="//cdn.example/chart.png">',
+    "stylesheet": '<link rel="stylesheet" href="theme.css">',
+    "image": '<img src="chart.png">',
+    "inline CSS": '<div style="background: URL ( chart.png )"></div>',
+    "style CSS": '<style>body { background: url(chart.png) }</style>',
+}.items():
+    try:
+        assert_self_contained_dashboard(malicious_html)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f"dashboard self-contained checker accepted {label}")
 
 results = Path(sys.argv[1])
 required_nonempty = [
@@ -342,6 +416,14 @@ with (results / "reports/qc_dashboard/tss_profiles.tsv").open(
 dashboard_html = (results / "reports/qc_dashboard/qc_dashboard.html").read_text(
     encoding="utf-8"
 )
+dashboard_dir = results / "reports/qc_dashboard"
+expected_dashboard_files = {
+    "qc_dashboard.html",
+    "qc_summary.tsv",
+    "qc_summary.json",
+    "top_motifs.tsv",
+    "tss_profiles.tsv",
+}
 
 assert {row["sample_id"] for row in summary_rows} == {"MINI_IgG", "MINI_CTCF"}
 ctcf = next(row for row in summary_rows if row["sample_id"] == "MINI_CTCF")
@@ -355,7 +437,9 @@ assert json_payload["schema_version"] == 1
 assert len(top_motif_rows) == 1
 assert top_motif_rows[0]["motif_alt_id"] == "CTCF"
 assert len(tss_rows) == 1200
-assert "https://" not in dashboard_html
+assert {path.name for path in dashboard_dir.iterdir()} == expected_dashboard_files
+assert all(path.is_file() and path.stat().st_size > 0 for path in dashboard_dir.iterdir())
+assert_self_contained_dashboard(dashboard_html)
 PY
 
 (
