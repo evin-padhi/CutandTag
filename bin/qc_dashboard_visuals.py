@@ -318,6 +318,29 @@ def _sample_label(
     )
 
 
+def _category_geometry(
+    sample_ids: Sequence[str], *, minimum_slot_width: float
+) -> tuple[bool, float, float, float]:
+    """Size category slots and margins so rendered labels stay in the SVG."""
+    longest = max((len(sample_id) for sample_id in sample_ids), default=0)
+    estimated_text_width = longest * 7.0
+    rotate_labels = longest > 14
+    if not rotate_labels:
+        return (
+            False,
+            max(minimum_slot_width, estimated_text_width + 18.0),
+            18.0,
+            42.0,
+        )
+    projected_text = estimated_text_width / math.sqrt(2.0)
+    return (
+        True,
+        max(minimum_slot_width, projected_text + 18.0),
+        projected_text + 18.0,
+        projected_text + 34.0,
+    )
+
+
 def render_bar_panel(
     title: str,
     rows: Sequence[Mapping[str, object]],
@@ -338,7 +361,7 @@ def render_bar_panel(
             value = None
         prepared.append((row, str(row.get("sample_id", "")), value))
     numeric = [value for _, _, value in prepared if value is not None]
-    if not numeric and not prepared:
+    if not numeric:
         return _empty_panel(title, axis_label)
 
     transformed = [math.log10(value) for value in numeric] if log10_axis else numeric
@@ -361,12 +384,12 @@ def render_bar_panel(
         ]
         displayed_axis_label = axis_label
 
-    longest = max((len(sample_id) for _, sample_id, _ in prepared), default=0)
-    rotate_labels = longest > 14
-    slot_width = max(56.0, min(190.0, longest * 7.0 + 18.0))
-    left, right_margin = 62.0, 18.0
+    rotate_labels, slot_width, right_margin, label_space = _category_geometry(
+        [sample_id for _, sample_id, _ in prepared],
+        minimum_slot_width=56.0,
+    )
+    left = 62.0
     plot_top, plot_bottom = 32.0, 236.0
-    label_space = min(150.0, longest * 5.0 + 32.0) if rotate_labels else 42.0
     height = plot_bottom + label_space
     width = max(500.0, left + right_margin + slot_width * len(prepared))
     plot_right = width - right_margin
@@ -473,17 +496,19 @@ def render_range_panel(
         if values is not None
         for value in values
     ]
+    if not observed:
+        return _empty_panel(title, axis_label)
     domain_max = _nice_linear_max(max(observed, default=0.0))
     ticks = [
         (value, format_significant(value, compact=True))
         for value in _linear_ticks(domain_max)
     ]
-    longest = max(len(str(row.get("sample_id", ""))) for row, _ in prepared)
-    rotate_labels = longest > 14
-    slot_width = max(58.0, min(190.0, longest * 7.0 + 18.0))
-    left, right_margin = 62.0, 18.0
+    rotate_labels, slot_width, right_margin, label_space = _category_geometry(
+        [str(row.get("sample_id", "")) for row, _ in prepared],
+        minimum_slot_width=58.0,
+    )
+    left = 62.0
     plot_top, plot_bottom = 32.0, 236.0
-    label_space = min(150.0, longest * 5.0 + 32.0) if rotate_labels else 42.0
     height = plot_bottom + label_space
     width = max(500.0, left + right_margin + slot_width * len(prepared))
     plot_right = width - right_margin
@@ -580,8 +605,14 @@ def render_scatter_panel(
     if not points:
         return _empty_panel(title, f"{displayed_x_axis}; {y_axis_label}")
 
-    width, height = 680.0, 330.0
+    height = 330.0
     left, right, plot_top, plot_bottom = 66.0, 535.0, 32.0, 270.0
+    label_x = right + 24.0
+    longest_label_width = max(
+        len(str(row.get("sample_id", ""))) * 7.0
+        for row, _, _, _ in points
+    )
+    width = max(680.0, label_x + longest_label_width + 20.0)
     x_values = [point[1] for point in points]
     y_values = [point[2] for point in points]
     if x_log10_axis:
@@ -634,7 +665,7 @@ def render_scatter_panel(
             sample_id, assay_target, is_control=bool(row.get("is_control"))
         )
         point_x, point_y = x_position(plotted_x), y_position(y_value)
-        label_x, label_y = right + 24.0, label_positions[sample_id]
+        label_y = label_positions[sample_id]
         tooltip = (
             f"{sample_id}: x {_exact_number(original_x)}; "
             f"y {_exact_number(y_value)}"
@@ -652,7 +683,8 @@ def render_scatter_panel(
         )
     accessible_name = f"{title}: {displayed_x_axis} by {y_axis_label}"
     svg = (
-        f'<svg class="panel-chart scatter-chart" viewBox="0 0 {width:.0f} {height:.0f}" '
+        f'<svg class="panel-chart scatter-chart" width="{width:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" '
         f'role="img" aria-label="{html.escape(accessible_name, quote=True)}">'
         f'<title>{html.escape(accessible_name)}</title>'
         f'<text class="axis-title axis-title-x" x="{(left + right) / 2:.1f}" '
@@ -673,7 +705,12 @@ def render_scatter_panel(
         + "".join(marks)
         + "</svg>"
     )
-    return f'<article class="qc-panel"><h3>{html.escape(title)}</h3>{svg}</article>'
+    return (
+        f'<article class="qc-panel"><h3>{html.escape(title)}</h3>'
+        f'<div class="panel-scroll" role="region" '
+        f'aria-label="{html.escape(title, quote=True)} chart" tabindex="0">'
+        f"{svg}</div></article>"
+    )
 
 
 def render_panel_grid(panels: Sequence[str], *, aria_label: str) -> str:

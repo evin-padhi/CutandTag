@@ -2,6 +2,7 @@ import sys
 import unittest
 from pathlib import Path
 import re
+import math
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -222,17 +223,46 @@ class BarAndScatterRenderingTests(unittest.TestCase):
         self.assertIn('aria-label="Mapped reads (%)"', panel)
         self.assertIn("No numeric data available", panel)
 
-    def test_short_labels_stay_horizontal_and_long_labels_rotate(self):
+    def test_nonempty_all_missing_bar_and_range_inputs_are_unavailable(self):
+        """Staged identities without values must not create a fake 0–1 chart."""
+        bar = visuals.render_bar_panel(
+            "Mapped reads",
+            [
+                {"sample_id": "S1", "mapped_percent": None},
+                {"sample_id": "S2", "mapped_percent": float("nan")},
+            ],
+            value_key="mapped_percent",
+            axis_label="%",
+        )
+        range_panel = visuals.render_range_panel(
+            "Peak width median and range",
+            [{"sample_id": "S1", "minimum": None, "q25": None,
+              "median": None, "q75": None, "maximum": None}],
+            minimum_key="minimum",
+            q25_key="q25",
+            median_key="median",
+            q75_key="q75",
+            maximum_key="maximum",
+            axis_label="Peak width (bp)",
+        )
+
+        for panel in (bar, range_panel):
+            self.assertIn('role="status"', panel)
+            self.assertIn("No numeric data available", panel)
+            self.assertNotIn("<svg", panel)
+
+    def test_short_labels_stay_horizontal_and_long_labels_fit_inside_viewbox(self):
         short = visuals.render_bar_panel(
             "Metric",
             [{"sample_id": "S1", "assay_target": "CTCF", "is_control": False, "value": 1}],
             value_key="value",
             axis_label="Units",
         )
+        long_id = "long_sample_identifier_" + "replicate_alpha_" * 8
         long = visuals.render_bar_panel(
             "Metric",
             [{
-                "sample_id": "long_sample_identifier_replicate_alpha",
+                "sample_id": long_id,
                 "assay_target": "CTCF",
                 "is_control": False,
                 "value": 1,
@@ -243,6 +273,97 @@ class BarAndScatterRenderingTests(unittest.TestCase):
 
         self.assertNotIn('class="sample-label rotated"', short)
         self.assertIn('class="sample-label rotated"', long)
+        viewbox = re.search(
+            r'viewBox="0 0 ([0-9.]+) ([0-9.]+)"', long
+        )
+        label = re.search(
+            r'class="sample-label rotated" x="([0-9.]+)" y="([0-9.]+)"',
+            long,
+        )
+        self.assertIsNotNone(viewbox)
+        self.assertIsNotNone(label)
+        projected_text = len(long_id) * 7.0 / math.sqrt(2.0)
+        self.assertGreaterEqual(
+            float(viewbox.group(1)),
+            float(label.group(1)) + projected_text + 10.0,
+        )
+        self.assertGreaterEqual(
+            float(viewbox.group(2)),
+            float(label.group(2)) + projected_text + 10.0,
+        )
+
+    def test_long_range_labels_also_fit_inside_viewbox(self):
+        long_id = "range_sample_" + "very_long_identifier_" * 8
+        panel = visuals.render_range_panel(
+            "Peak width",
+            [{
+                "sample_id": long_id,
+                "minimum": 10,
+                "q25": 20,
+                "median": 30,
+                "q75": 40,
+                "maximum": 50,
+            }],
+            minimum_key="minimum",
+            q25_key="q25",
+            median_key="median",
+            q75_key="q75",
+            maximum_key="maximum",
+            axis_label="Peak width (bp)",
+        )
+
+        viewbox = re.search(
+            r'viewBox="0 0 ([0-9.]+) ([0-9.]+)"', panel
+        )
+        label = re.search(
+            r'class="sample-label rotated" x="([0-9.]+)" y="([0-9.]+)"',
+            panel,
+        )
+        self.assertIsNotNone(viewbox)
+        self.assertIsNotNone(label)
+        projected_text = len(long_id) * 7.0 / math.sqrt(2.0)
+        self.assertGreaterEqual(
+            float(viewbox.group(1)),
+            float(label.group(1)) + projected_text + 10.0,
+        )
+        self.assertGreaterEqual(
+            float(viewbox.group(2)),
+            float(label.group(2)) + projected_text + 10.0,
+        )
+
+    def test_scatter_long_direct_label_has_intrinsic_scrollable_rail(self):
+        long_id = "scatter_sample_" + "very_long_identifier_" * 8
+        panel = visuals.render_scatter_panel(
+            "Peak count vs usable fragments",
+            [{
+                "sample_id": long_id,
+                "assay_target": "CTCF",
+                "is_control": False,
+                "usable": 6.17,
+                "peaks": 17.2,
+            }],
+            x_key="usable",
+            y_key="peaks",
+            x_axis_label="Usable fragments (millions)",
+            y_axis_label="Peaks (thousands)",
+        )
+
+        svg = re.search(
+            r'<svg class="panel-chart scatter-chart" width="([0-9.]+)" '
+            r'viewBox="0 0 ([0-9.]+) ([0-9.]+)"',
+            panel,
+        )
+        label_x = re.search(
+            r'class="scatter-label" x="([0-9.]+)"', panel
+        )
+        self.assertIsNotNone(svg)
+        self.assertIsNotNone(label_x)
+        self.assertEqual(float(svg.group(1)), float(svg.group(2)))
+        self.assertGreaterEqual(
+            float(svg.group(2)),
+            float(label_x.group(1)) + len(long_id) * 7.0 + 16.0,
+        )
+        self.assertIn('class="panel-scroll"', panel)
 
     def test_one_hundred_samples_expand_within_horizontal_scroll(self):
         panel = visuals.render_bar_panel(
