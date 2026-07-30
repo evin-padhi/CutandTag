@@ -1,3 +1,6 @@
+import csv
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -450,6 +453,190 @@ class ReportDataTests(unittest.TestCase):
                 metadata, {}, {"S2": {"sample_id": "S2"}}, {}, {}, {}, {},
                 annotation_status="skipped_no_annotation",
             )
+
+
+class DashboardOutputTests(unittest.TestCase):
+    """The outputs remain reproducible and safe to open without a network."""
+
+    def make_workspace(self):
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        return Path(temporary_directory.name)
+
+    def report_data(self):
+        """Hand-authored joined data proves serialization, not parser behavior."""
+        metadata = {
+            "Z_TARGET": {
+                "sample_id": "Z_TARGET", "library_id": "L1", "input_group": "25K",
+                "assay_target": "CTCF", "is_control": False, "control_id": "A_IGG",
+                "expected_motif": "CTCF & <target>",
+            },
+            "A_IGG": {
+                "sample_id": "A_IGG", "library_id": "L1", "input_group": "25K",
+                "assay_target": "IgG", "is_control": True, "control_id": None,
+                "expected_motif": None,
+            },
+        }
+        data = qc.build_report_data(
+            metadata,
+            {
+                "L1": {
+                    "total_reads": 100, "assigned_reads": 80, "ambiguous_reads": 5,
+                    "unassigned_reads": 15, "assigned_fraction": 0.8,
+                    "ambiguous_fraction": 0.05, "unassigned_fraction": 0.15,
+                    "assignment_counts": {"A_IGG": 30, "Z_TARGET": 50},
+                },
+            },
+            {"Z_TARGET": {"sample_id": "Z_TARGET", "mapped_percent": 95.0}},
+            {},
+            {
+                "A_IGG": {
+                    "status": "computed", "enrichment": 1.0,
+                    "profile": [(10, 1.0), (-10, 2.0)],
+                },
+                "Z_TARGET": {
+                    "status": "computed", "enrichment": 4.0,
+                    "profile": [(10, 4.0), (-10, 2.0)],
+                },
+            },
+            {
+                "Z_TARGET": {
+                    "status": "computed", "best_motif_id": "MA0139.1 <best>",
+                    "best_adjusted_p_value": 0.001, "ame_status": "computed",
+                },
+            },
+            {
+                "A_IGG": [{"motif_id": "must-not-export"}],
+                "Z_TARGET": [
+                    {
+                        "motif_id": f"M{rank:02d} & <motif>", "motif_alt_id": "CTCF",
+                        "adjusted_p_value": rank / 1000, "p_value": rank / 100,
+                        "effect": 2.0, "positive_sequences": 4, "rank": rank,
+                    }
+                    for rank in range(11, 0, -1)
+                ],
+            },
+            annotation_status="computed_bed",
+        )
+        data["samples_by_id"]["Z_TARGET"]["warnings"].append(
+            {"message": "Z_TARGET: NA warning & <visible>"}
+        )
+        data["warnings"] = [
+            warning for sample in data["samples"] for warning in sample["warnings"]
+        ]
+        return data
+
+    def test_serializers_use_stable_columns_and_json_null(self):
+        """A rearranged or zero-filled summary would break downstream analysis."""
+        workspace = self.make_workspace()
+        data = self.report_data()
+
+        qc.write_outputs(data, workspace)
+
+        with (workspace / "qc_summary.tsv").open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(list(rows[0]), qc.QC_SUMMARY_COLUMNS)
+        self.assertEqual(rows[0]["frip"], "")
+        self.assertEqual([row["sample_id"] for row in rows], ["A_IGG", "Z_TARGET"])
+        payload = json.loads((workspace / "qc_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["schema_version"], 1)
+        self.assertIsNone(payload["samples"][0]["peak"]["frip"])
+        self.assertEqual(
+            payload["metric_definitions"]["tss_enrichment"]["formula"],
+            "center_bin_signal / mean(terminal_100bp_flanks)",
+        )
+
+    def test_tidy_exports_exclude_controls_limit_motifs_and_order_rows(self):
+        """Controls must not leak into motif biology and sortable exports stay stable."""
+        workspace = self.make_workspace()
+
+        qc.write_outputs(self.report_data(), workspace)
+
+        with (workspace / "top_motifs.tsv").open(encoding="utf-8", newline="") as handle:
+            motif_rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(len(motif_rows), 10)
+        self.assertEqual({row["sample_id"] for row in motif_rows}, {"Z_TARGET"})
+        self.assertEqual([int(row["rank"]) for row in motif_rows], list(range(1, 11)))
+        with (workspace / "tss_profiles.tsv").open(encoding="utf-8", newline="") as handle:
+            profile_rows = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(list(profile_rows[0]), ["sample_id", "position_bp", "signal"])
+        self.assertEqual(
+            [(row["sample_id"], int(row["position_bp"])) for row in profile_rows],
+            [("A_IGG", -10), ("A_IGG", 10), ("Z_TARGET", -10), ("Z_TARGET", 10)],
+        )
+
+    def test_dashboard_is_offline_semantic_descriptive_and_escaped(self):
+        """Unescaped input or a hidden classification changes the report contract."""
+        html = qc.render_dashboard(self.report_data())
+
+        for section_id in (
+            "run-overview", "demultiplexing", "alignment", "peaks-frip",
+            "tss-enrichment", "motif-enrichment",
+        ):
+            self.assertIn(f'id="{section_id}"', html)
+        self.assertIn("<svg", html)
+        self.assertNotIn("https://", html)
+        self.assertNotIn("http://", html)
+        self.assertNotIn("overall pass", html.lower())
+        self.assertNotIn("overall fail", html.lower())
+        self.assertNotIn('class="qc-pass"', html)
+        self.assertNotIn('class="qc-fail"', html)
+        for visible_text in (
+            "NA", "Targets (solid)", "IgG controls (outlined)",
+            "CTCF &amp; &lt;target&gt;", "M01 &amp; &lt;motif&gt;",
+            "NA warning &amp; &lt;visible&gt;",
+        ):
+            self.assertIn(visible_text, html)
+        self.assertNotIn("CTCF & <target>", html)
+        self.assertNotIn("M01 & <motif>", html)
+
+    def test_cli_publishes_a_complete_output_set_and_reports_input_errors(self):
+        """A partial report must never be published after a bad command invocation."""
+        workspace = self.make_workspace()
+        metadata = workspace / "sample_metadata.json"
+        metadata.write_text(json.dumps([
+            {
+                "sample_id": "S1", "library_id": "L1", "input_group": "25K",
+                "assay_target": "CTCF", "is_control": False, "control_id": "I1",
+                "expected_motif": "CTCF",
+            },
+            {
+                "sample_id": "I1", "library_id": "L1", "input_group": "25K",
+                "assay_target": "IgG", "is_control": True, "control_id": None,
+                "expected_motif": None,
+            },
+        ]), encoding="utf-8")
+        directories = {}
+        for name in ("demux", "library", "insert", "peak", "tss", "motif", "ame"):
+            directories[name] = workspace / name
+            directories[name].mkdir()
+        (directories["demux"] / "L1.metrics.json").write_text(json.dumps({
+            "total_reads": 4, "assigned_reads": 4, "ambiguous_reads": 0,
+            "unassigned_reads": 0, "assignment_counts": {"I1": 1, "S1": 3},
+        }), encoding="utf-8")
+        (directories["library"] / "S1.library_qc.tsv").write_text(
+            "sample_id\tmapped_percent\nS1\t95\n", encoding="utf-8"
+        )
+        outdir = workspace / "dashboard"
+        arguments = [
+            "--metadata", str(metadata), "--demux-dir", str(directories["demux"]),
+            "--library-dir", str(directories["library"]), "--insert-dir", str(directories["insert"]),
+            "--peak-dir", str(directories["peak"]), "--tss-dir", str(directories["tss"]),
+            "--motif-dir", str(directories["motif"]), "--ame-dir", str(directories["ame"]),
+            "--annotation-status", "computed_bed", "--outdir", str(outdir),
+        ]
+
+        self.assertEqual(qc.main(arguments), 0)
+        self.assertEqual(
+            {path.name for path in outdir.iterdir()},
+            {"qc_dashboard.html", "qc_summary.tsv", "qc_summary.json", "top_motifs.tsv", "tss_profiles.tsv"},
+        )
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error):
+            result = qc.main(["--metadata", str(workspace / "missing.json"), *arguments[2:]])
+        self.assertEqual(result, 2)
+        self.assertIn("qc_dashboard.py: error:", error.getvalue())
+        self.assertTrue((outdir / "qc_dashboard.html").is_file())
 
 
 if __name__ == "__main__":
