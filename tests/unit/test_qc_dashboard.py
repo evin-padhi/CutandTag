@@ -606,6 +606,47 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertIn('stroke-dasharray="6 4"', control_trace.group())
         self.assertNotIn("stroke-dasharray", target_trace.group())
 
+    def test_dashboard_tables_are_scrollable_without_page_width_overflow(self):
+        """Narrow viewports need per-table scrolling instead of a clipped page."""
+        html = qc.render_dashboard(self.report_data())
+
+        self.assertGreater(html.count("<table>"), 0)
+        self.assertEqual(
+            html.count("<table>"),
+            html.count(
+                '<div class="table-scroll" role="region" '
+                'aria-label="Scrollable data table" tabindex="0"><table>'
+            ),
+        )
+        self.assertIn(
+            ".table-scroll{max-width:100%;overflow-x:auto}",
+            html,
+        )
+
+    def test_line_chart_series_labels_have_nonoverlapping_vertical_spacing(self):
+        """Adjacent TSS series labels need enough baseline spacing for rendered text."""
+        chart = qc.render_line_chart(
+            "TSS profiles",
+            {
+                "A_IGG": {"profile": [(-10, 1), (10, 2)], "is_control": True},
+                "Z_TARGET": {"profile": [(-10, 2), (10, 4)], "is_control": False},
+            },
+        )
+
+        label_positions = {
+            label: float(position)
+            for position, label in re.findall(
+                r'<text x="622" y="([0-9.]+)" text-anchor="end" '
+                r'fill="[^"]+">([^<]+)</text>',
+                chart,
+            )
+        }
+        self.assertEqual(set(label_positions), {"A_IGG", "Z_TARGET"})
+        self.assertGreaterEqual(
+            label_positions["Z_TARGET"] - label_positions["A_IGG"],
+            20,
+        )
+
     def test_cli_publishes_a_complete_output_set_and_reports_input_errors(self):
         """A partial report must never be published after a bad command invocation."""
         workspace = self.make_workspace()

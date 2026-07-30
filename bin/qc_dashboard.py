@@ -636,7 +636,12 @@ def render_table(columns, rows, *, empty_message):
         + "</tr>"
         for row in rows
     )
-    return f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+    return (
+        '<div class="table-scroll" role="region" '
+        'aria-label="Scrollable data table" tabindex="0">'
+        f"<table><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>"
+        "</div>"
+    )
 
 
 def render_bar_chart(
@@ -726,7 +731,7 @@ def render_line_chart(title: str, profiles: Mapping[str, object]) -> str:
         paths.append(
             f'<polyline data-sample-kind="{kind}" points="{coordinates}" fill="none" stroke="{color}" stroke-width="2"{dash}>'
             f'<title>{html.escape(tooltip)}</title></polyline>'
-            f'<text x="{width - 18}" y="{36 + index * 16}" text-anchor="end" fill="{color}">{html.escape(sample_id)}</text>'
+            f'<text x="{width - 18}" y="{36 + index * 20}" text-anchor="end" fill="{color}">{html.escape(sample_id)}</text>'
         )
     return (
         f'<svg class="chart" viewBox="0 0 {width} {height}" role="img" aria-label="{html.escape(title)}">'
@@ -811,7 +816,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Consolidated QC dashboard</title><style>
-body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1100px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
+body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1100px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
 </style></head><body><main><h1>Consolidated QC dashboard</h1><p>Descriptive technical and biological QC summary; no biological thresholds are applied.</p>""" + body + "</main></body></html>"
 
 
