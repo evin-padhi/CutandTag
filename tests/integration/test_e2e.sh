@@ -207,6 +207,33 @@ PY
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/nanocut-e2e.XXXXXX")
 trap 'rm -rf -- "${tmp_dir:?}"' EXIT
 
+python3 tests/data/e2e/fakebin/fake_bio_tool.py \
+  --fake-tool ame > "$tmp_dir/fake-ame.tsv"
+
+python3 - "$tmp_dir/fake-ame.tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lines = path.read_text(encoding="utf-8").splitlines()
+assert lines[0] == "# motif_qc_complete_database=true"
+rows = list(csv.DictReader(
+    (line for line in lines if not line.startswith("#")),
+    delimiter="\t",
+))
+assert len(rows) > 15
+observed = {(row["motif_ID"], row["motif_Alt_ID"]) for row in rows}
+assert {
+    ("MA0139.1", "CTCF"),
+    ("MA1929.1", "CTCF::ZNF143"),
+    ("MA0140.2", "GATA1::TAL1"),
+    ("MA1356.1", "TAL1::GATA1"),
+    ("MA0002.2", "RUNX1"),
+    ("MA9999.1", "GATA10"),
+}.issubset(observed)
+PY
+
 python3 bin/manifest.py validate \
   --input tests/data/e2e/samples.csv \
   --output "$tmp_dir/normalized.json"
@@ -443,11 +470,47 @@ assert igg["is_control"] == "true"
 assert igg["frip"] == ""
 assert igg["expected_motif_status"] == "not_applicable_control"
 assert json_payload["schema_version"] == 1
-assert len(top_motif_rows) == 1
+assert json_payload["generator_version"] == "1.1.0"
+json_samples = {
+    sample["sample_id"]: sample
+    for sample in json_payload["samples"]
+}
+assert json_samples["MINI_CTCF"]["library"]["insert_size_distribution"] == [
+    {"insert_size": 100, "pair_count": 2},
+]
+assert json_samples["MINI_CTCF"]["peak"]["width_distribution"] == [
+    {"width": 240, "peak_count": 1},
+]
+assert json_samples["MINI_CTCF"]["peak"]["fragments_per_peak_distribution"] == [
+    {"fragment_count": 2, "peak_count": 1},
+]
+assert json_samples["MINI_IgG"]["peak"]["fragments_per_peak_distribution"] is None
+assert len(top_motif_rows) == 10
 assert top_motif_rows[0]["motif_alt_id"] == "CTCF"
 assert len(tss_rows) == 1200
 assert {path.name for path in dashboard_dir.iterdir()} == expected_dashboard_files
 assert all(path.is_file() and path.stat().st_size > 0 for path in dashboard_dir.iterdir())
+for title in (
+    "Assigned read pairs",
+    "Barcode balance within library",
+    "Mapped reads",
+    "Usable fragments after filtering",
+    "PCR duplication",
+    "End-to-end usable yield",
+    "Peak count",
+    "Fraction of reads in peaks",
+    "Total bases covered by peaks",
+    "Peak width median and range",
+    "Peak count vs usable fragments",
+):
+    assert f"<h3>{title}</h3>" in dashboard_html
+assert "250 bp bins" in dashboard_html
+assert "<h3>Fragments per peak</h3>" in dashboard_html
+assert 'aria-label="Motif enrichment heatmap"' in dashboard_html
+assert 'class="endpoint-label"' in dashboard_html
+details_tags = re.findall(r"<details\b[^>]*>", dashboard_html)
+assert details_tags
+assert all(not re.search(r"\bopen(?:\s|=|>)", tag) for tag in details_tags)
 assert_self_contained_dashboard(dashboard_html)
 PY
 

@@ -212,6 +212,11 @@ checks = {
     "QC subworkflow includes and invokes the consolidated dashboard":
         "include { QC_DASHBOARD } from '../../modules/local/qc_dashboard'" in qc
         and "QC_DASHBOARD(" in qc,
+    "QC collects fragments-per-peak outputs":
+        ".map { meta, json, tsv, histogram, perPeak -> perPeak }" in qc,
+    "dashboard stages fragments-per-peak files":
+        "path peak_fragment_counts" in qc_dashboard
+        and "dashboard_inputs/peak/fragments??/*" in qc_dashboard,
     "dashboard Groovy script contains no nested triple-double-quoted strings":
         qc_dashboard.count('"""') == 2,
     "QC subworkflow exposes consolidated dashboard report artifacts":
@@ -234,7 +239,7 @@ checks = {
         and '"AME status"' in qc_dashboard,
     "dashboard receives explicit motif-analysis intent and generator version":
         '--motif-analysis-status "${motifAnalysisStatus}"' in qc_dashboard
-        and "qc_dashboard.py: 1.0.0" in qc_dashboard,
+        and "qc_dashboard.py: 1.1.0" in qc_dashboard,
     "dashboard atomically builds outside the live Nextflow task directory":
         '--outdir "dashboard_bundle"' in qc_dashboard
         and '"dashboard_bundle/qc_dashboard.html"' in qc_dashboard
@@ -697,6 +702,8 @@ mkdir -p \
   "$dashboard_fixture/dashboard_inputs/ame_status/statuses02" \
   "$dashboard_fixture/dashboard_inputs/motif/metrics01" \
   "$dashboard_fixture/dashboard_inputs/motif/metrics02" \
+  "$dashboard_fixture/dashboard_inputs/peak/fragments01" \
+  "$dashboard_fixture/dashboard_inputs/peak/fragments02" \
   "$dashboard_fixture/dashboard_inputs/normalized_ame" \
   "$dashboard_fixture/dashboard_inputs/normalized_motif"
 ln -s "$dashboard_fixture/ame_sources/ame01" \
@@ -721,6 +728,10 @@ printf 'sample_id\texpected_motif_status\nTARGET_A\tpass\n' \
   > "$dashboard_fixture/dashboard_inputs/motif/metrics01/TARGET_A.motif_qc.tsv"
 printf 'sample_id\texpected_motif_status\nTARGET_B\tno_peaks\n' \
   > "$dashboard_fixture/dashboard_inputs/motif/metrics02/TARGET_B.motif_qc.tsv"
+printf 'chrom\tstart\tend\tpeak_name\twidth\tscore\tsignal_value\tfragment_count\n' \
+  > "$dashboard_fixture/dashboard_inputs/peak/fragments01/TARGET_A.peak_qc.fragments_per_peak.tsv"
+printf 'chrom\tstart\tend\tpeak_name\twidth\tscore\tsignal_value\tfragment_count\n' \
+  > "$dashboard_fixture/dashboard_inputs/peak/fragments02/TARGET_B.peak_qc.fragments_per_peak.tsv"
 (
   cd "$dashboard_fixture"
   python3 "$repo_root/.qc_dashboard_preprocess.test.py"
@@ -795,9 +806,11 @@ for ordinal, sample_id in enumerate(sample_ids, start=1):
     result = root / "dashboard_inputs" / "ame" / f"results{stage}" / "ame"
     status = root / "dashboard_inputs" / "ame_status" / f"statuses{stage}"
     motif = root / "dashboard_inputs" / "motif" / f"metrics{stage}"
+    fragments = root / "dashboard_inputs" / "peak" / f"fragments{stage}"
     result.mkdir(parents=True)
     status.mkdir(parents=True)
     motif.mkdir(parents=True)
+    fragments.mkdir(parents=True)
     (result / "ame.tsv").write_text(
         "rank\tmotif_ID\tmotif_Alt_ID\tp-value\tE-value\tpos\tneg\n"
         f"1\tMOTIF_{ordinal:03d}\tALT_{ordinal:03d}\t0.001\t0.01\t1\t1\n",
@@ -806,6 +819,11 @@ for ordinal, sample_id in enumerate(sample_ids, start=1):
     expected_status = "computed" if ordinal % 2 else "no_peaks"
     (status / "ame_status.tsv").write_text(
         f"status\t{expected_status}\n",
+        encoding="utf-8",
+    )
+    (fragments / f"{sample_id}.peak_qc.fragments_per_peak.tsv").write_text(
+        "chrom\tstart\tend\tpeak_name\twidth\tscore\t"
+        "signal_value\tfragment_count\n",
         encoding="utf-8",
     )
     with (motif / f"{sample_id}.motif_qc.tsv").open(

@@ -460,6 +460,83 @@ class MetadataAndTableParserTests(unittest.TestCase):
             },
         )
 
+    def test_fragments_per_peak_parser_compacts_real_producer_rows(self):
+        """Raw per-peak identities must collapse to a small count histogram."""
+        workspace = self.make_workspace()
+        path = workspace / "S1.peak_qc.fragments_per_peak.tsv"
+        path.write_text(
+            "chrom\tstart\tend\tpeak_name\twidth\tscore\tsignal_value\tfragment_count\n"
+            "chr1\t0\t250\tp1\t250\t10\t3.5\t0\n"
+            "chr1\t500\t1000\tp2\t500\t12\t5.0\t4\n"
+            "chr2\t0\t750\tp3\t750\t8\t2.0\t4\n",
+            encoding="utf-8",
+        )
+        empty_path = workspace / "S2.peak_qc.fragments_per_peak.tsv"
+        empty_path.write_text(
+            "chrom\tstart\tend\tpeak_name\twidth\tscore\t"
+            "signal_value\tfragment_count\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            qc.read_fragments_per_peak_distributions([path, empty_path]),
+            {
+                "S1": [
+                    {"fragment_count": 0, "peak_count": 1},
+                    {"fragment_count": 4, "peak_count": 2},
+                ],
+                "S2": [],
+            },
+        )
+
+    def test_fragments_per_peak_parser_rejects_ambiguous_or_invalid_inputs(self):
+        """Malformed producer data must not be silently joined to a target."""
+        workspace = self.make_workspace()
+        header = (
+            "chrom\tstart\tend\tpeak_name\twidth\tscore\t"
+            "signal_value\tfragment_count\n"
+        )
+        cases = (
+            (
+                "wrong-header.peak_qc.fragments_per_peak.tsv",
+                "chrom\tstart\tend\tpeak_name\tfragment_count\n",
+                "columns must exactly match the producer schema",
+            ),
+            (
+                "negative.peak_qc.fragments_per_peak.tsv",
+                header + "chr1\t0\t1\tp1\t1\t1\t1\t-1\n",
+                "finite and >= 0",
+            ),
+            (
+                "fractional.peak_qc.fragments_per_peak.tsv",
+                header + "chr1\t0\t1\tp1\t1\t1\t1\t1.5\n",
+                "must be an integer",
+            ),
+            (
+                "wrong.tsv",
+                header,
+                "unexpected fragments-per-peak distribution filename",
+            ),
+        )
+        for filename, contents, expression in cases:
+            with self.subTest(filename=filename):
+                path = workspace / filename
+                path.write_text(contents, encoding="utf-8")
+                with self.assertRaisesRegex(qc.DashboardInputError, expression):
+                    qc.read_fragments_per_peak_distributions([path])
+
+        duplicate_a = workspace / "first" / "S1.peak_qc.fragments_per_peak.tsv"
+        duplicate_b = workspace / "second" / "S1.peak_qc.fragments_per_peak.tsv"
+        duplicate_a.parent.mkdir()
+        duplicate_b.parent.mkdir()
+        duplicate_a.write_text(header, encoding="utf-8")
+        duplicate_b.write_text(header, encoding="utf-8")
+        with self.assertRaisesRegex(
+            qc.DashboardInputError,
+            "duplicate fragments-per-peak distribution sample_id S1",
+        ):
+            qc.read_fragments_per_peak_distributions([duplicate_a, duplicate_b])
+
     def test_distribution_parsers_reject_filename_and_row_identity_mismatch(self):
         """A row must never be attached to the sample encoded by another file."""
         workspace = self.make_workspace()
@@ -663,6 +740,268 @@ class TssAndAmeTests(unittest.TestCase):
             {"motif_id", "motif_alt_id", "adjusted_p_value", "p_value", "effect", "positive_sequences", "rank"},
         )
 
+    def test_read_all_ame_retains_rows_beyond_top_ten(self):
+        """The heatmap needs the complete AME result while legacy exports stay bounded."""
+        workspace = self.make_workspace()
+        path = workspace / "ame.tsv"
+        rows = [
+            "rank\tmotif_ID\tmotif_Alt_ID\tadj_p-value\tp-value\tscore\tpos",
+            "1\t__NO_PEAKS__\t__NO_PEAKS__\t0\t0\t0\t0",
+        ]
+        rows.extend(
+            f"{rank}\tM{rank:02d}\tmotif-{rank:02d}\t{rank / 1000}\t"
+            f"{rank / 100}\t2\t4"
+            for rank in range(1, 13)
+        )
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+        all_records = qc.read_all_ame(path)
+        top_records = qc.read_top_ame(path)
+
+        self.assertEqual(len(all_records), 12)
+        self.assertEqual(len(top_records), 10)
+        self.assertEqual(
+            [row["motif_id"] for row in top_records],
+            [row["motif_id"] for row in all_records[:10]],
+        )
+        self.assertNotIn("__NO_PEAKS__", [row["motif_id"] for row in all_records])
+
+    def test_cognate_matching_uses_complete_case_insensitive_tokens(self):
+        """Punctuation-delimited TF names match, but longer symbols do not."""
+        self.assertTrue(qc.is_cognate_motif("GATA1", "MA0140.2", "GATA1::TAL1"))
+        self.assertTrue(qc.is_cognate_motif("GATA1", "TAL1::gata1", "complex"))
+        self.assertFalse(qc.is_cognate_motif("GATA1", "MA9999", "GATA10"))
+
+    def test_ame_directory_load_keeps_complete_internal_and_bounded_public_records(self):
+        """A single AME read supplies both heatmap data and the legacy top-ten export."""
+        workspace = self.make_workspace()
+        path = workspace / "S1" / "ame" / "ame.tsv"
+        path.parent.mkdir(parents=True)
+        rows = [
+            "rank\tmotif_ID\tmotif_Alt_ID\tadj_p-value\tp-value\tscore\tpos",
+        ]
+        rows.extend(
+            f"{rank}\tM{rank:02d}\tmotif-{rank:02d}\t{rank / 1000}\t"
+            f"{rank / 100}\t2\t4"
+            for rank in range(1, 13)
+        )
+        path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+        all_motifs, top_motifs = qc._read_ame_motifs_from_directory(workspace)
+        data = qc.build_report_data(
+            {
+                "S1": {
+                    "sample_id": "S1", "library_id": "L1",
+                    "assay_target": "GATA1", "is_control": False,
+                    "input_group": None, "control_id": None,
+                    "expected_motif": "GATA1",
+                },
+            },
+            {}, {}, {}, {}, {}, top_motifs,
+            annotation_status="skipped_no_annotation",
+            ame_motifs=all_motifs,
+            motif_analysis_status="computed",
+        )
+
+        self.assertEqual(len(data["samples_by_id"]["S1"]["ame_motifs"]), 12)
+        self.assertEqual(len(data["samples_by_id"]["S1"]["top_motifs"]), 10)
+        public_sample = qc._json_payload(data)["samples"][0]
+        self.assertNotIn("ame_motifs", public_sample)
+        self.assertEqual(len(public_sample["top_motifs"]), 10)
+
+    def test_build_motif_heatmap_selects_targets_cognates_and_top_noncognates(self):
+        """The cohort matrix excludes controls and bounds only noncognate rows."""
+        noncognate = [
+            {
+                "motif_id": f"MA_OTHER_{index:02d}",
+                "motif_alt_id": f"OTHER{index:02d}",
+                "adjusted_p_value": 0.01 + index / 1000 if index < 12 else None,
+            }
+            for index in range(17)
+        ]
+        gata_records = [
+            {
+                "motif_id": "MA_GATA1", "motif_alt_id": "GATA1::TAL1",
+                "adjusted_p_value": 0.001,
+            },
+            {
+                "motif_id": "MA_GATA10", "motif_alt_id": "GATA10",
+                "adjusted_p_value": 0.15,
+            },
+            {
+                "motif_id": "MA_ZERO", "motif_alt_id": "ZERO",
+                "adjusted_p_value": 0,
+            },
+            {
+                "motif_id": "MA_NS", "motif_alt_id": "NS",
+                "adjusted_p_value": 0.2,
+            },
+            *noncognate,
+        ]
+        samples = [
+            {
+                "sample_id": "GATA_sample", "expected_motif": "GATA1",
+                "is_control": False, "ame_motifs": gata_records,
+            },
+            {
+                "sample_id": "CTCF_sample", "expected_motif": "CTCF",
+                "is_control": False,
+                "ame_motifs": [{
+                    "motif_id": "MA_CTCF", "motif_alt_id": "CTCF",
+                    "adjusted_p_value": None,
+                }],
+            },
+            {
+                "sample_id": "IgG_sample", "expected_motif": None,
+                "is_control": True, "ame_motifs": gata_records,
+            },
+        ]
+
+        matrix = qc.build_motif_heatmap(samples)
+
+        self.assertNotIn("IgG_sample", matrix["sample_ids"])
+        self.assertEqual(matrix["sample_ids"], ["CTCF_sample", "GATA_sample"])
+        self.assertIn(("MA_GATA1", "GATA1::TAL1"), matrix["motif_keys"])
+        self.assertNotIn(
+            ("MA_GATA10", "GATA10"), matrix["forced_cognate_keys"]
+        )
+        self.assertEqual(len(matrix["noncognate_keys"]), 15)
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", ("MA_ZERO", "ZERO"))]["score"],
+            60.0,
+        )
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", ("MA_ZERO", "ZERO"))]["label"],
+            ">60",
+        )
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", ("MA_NS", "NS"))]["label"],
+            "ns",
+        )
+        self.assertEqual(
+            matrix["cells"][
+                ("GATA_sample", ("MA_GATA1", "GATA1::TAL1"))
+            ]["score"],
+            3.0,
+        )
+        self.assertEqual(
+            matrix["cells"][("CTCF_sample", ("MA_CTCF", "CTCF"))]["label"],
+            "ns",
+        )
+        self.assertTrue(
+            matrix["cells"][
+                ("GATA_sample", ("MA_GATA1", "GATA1::TAL1"))
+            ]["outlined"]
+        )
+
+    def test_build_motif_heatmap_forces_cognate_seen_in_another_sample(self):
+        """Every cohort TF forces matching motifs even when its own AME row is absent."""
+        samples = [
+            {
+                "sample_id": "GATA_sample", "expected_motif": "GATA1",
+                "is_control": False, "ame_motifs": [],
+            },
+            {
+                "sample_id": "CTCF_sample", "expected_motif": "CTCF",
+                "is_control": False,
+                "ame_motifs": [{
+                    "motif_id": "MA_GATA", "motif_alt_id": "GATA1::TAL1",
+                    "adjusted_p_value": 0.001,
+                }],
+            },
+        ]
+
+        matrix = qc.build_motif_heatmap(samples, noncognate_limit=0)
+        motif_key = ("MA_GATA", "GATA1::TAL1")
+
+        self.assertEqual(matrix["forced_cognate_keys"], [motif_key])
+        self.assertEqual(matrix["motif_keys"], [motif_key])
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", motif_key)]["label"], "ns"
+        )
+        self.assertTrue(
+            matrix["cells"][("GATA_sample", motif_key)]["outlined"]
+        )
+        self.assertFalse(
+            matrix["cells"][("CTCF_sample", motif_key)]["outlined"]
+        )
+
+    def test_build_motif_heatmap_collapses_case_variants_with_stable_display(self):
+        """Case variants share one identity while the best value supplies the cell."""
+        samples = [{
+            "sample_id": "GATA_sample", "expected_motif": "GATA1",
+            "is_control": False,
+            "ame_motifs": [
+                {
+                    "motif_id": "ma_gata", "motif_alt_id": "gata1::tal1",
+                    "adjusted_p_value": 0.001,
+                },
+                {
+                    "motif_id": "MA_GATA", "motif_alt_id": "GATA1::TAL1",
+                    "adjusted_p_value": 0.01,
+                },
+            ],
+        }]
+
+        matrix = qc.build_motif_heatmap(samples, noncognate_limit=0)
+        motif_key = ("MA_GATA", "GATA1::TAL1")
+
+        self.assertEqual(matrix["motif_keys"], [motif_key])
+        self.assertEqual(matrix["forced_cognate_keys"], [motif_key])
+        self.assertEqual(
+            matrix["cells"][("GATA_sample", motif_key)]["score"], 3.0
+        )
+
+    def test_build_motif_heatmap_preserves_cell_reasons_and_cap_boundary(self):
+        """Missing motifs and unavailable AME runs must not collapse into one ``ns``."""
+        motif = {
+            "motif_id": "MA_CTCF", "motif_alt_id": "CTCF",
+            "adjusted_p_value": 1e-60,
+        }
+        samples = [
+            {
+                "sample_id": "PRESENT", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "computed"},
+                "ame_motifs": [motif],
+            },
+            {
+                "sample_id": "MISSING_MOTIF", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "computed"},
+                "ame_motifs": [],
+            },
+            {
+                "sample_id": "NO_PEAKS", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "no_peaks"},
+                "ame_motifs": [],
+            },
+            {
+                "sample_id": "FAILED", "expected_motif": "CTCF",
+                "is_control": False, "motif": {"ame_status": "failed"},
+                "ame_motifs": [],
+            },
+        ]
+
+        matrix = qc.build_motif_heatmap(samples, noncognate_limit=0)
+        motif_key = ("MA_CTCF", "CTCF")
+        cells = matrix["cells"]
+
+        self.assertEqual(cells[("PRESENT", motif_key)]["label"], ">60")
+        self.assertEqual(cells[("PRESENT", motif_key)]["state"], "computed")
+        self.assertEqual(
+            cells[("MISSING_MOTIF", motif_key)]["reason"],
+            "motif absent from AME results",
+        )
+        self.assertEqual(cells[("MISSING_MOTIF", motif_key)]["state"], "missing_motif")
+        self.assertEqual(cells[("NO_PEAKS", motif_key)]["state"], "no_peaks")
+        self.assertEqual(
+            cells[("NO_PEAKS", motif_key)]["reason"],
+            "AME unavailable because no peaks were called",
+        )
+        self.assertEqual(cells[("FAILED", motif_key)]["state"], "unavailable")
+        self.assertEqual(
+            cells[("FAILED", motif_key)]["reason"], "AME unavailable: failed"
+        )
+
 
 class ReportDataTests(unittest.TestCase):
     def test_build_report_data_joins_target_and_preserves_control_optional_gaps(self):
@@ -726,6 +1065,12 @@ class ReportDataTests(unittest.TestCase):
             qc.build_report_data(
                 metadata, {}, {"S2": {"sample_id": "S2"}}, {}, {}, {}, {},
                 annotation_status="skipped_no_annotation",
+            )
+        with self.assertRaisesRegex(qc.DashboardInputError, "unknown sample_id S2"):
+            qc.build_report_data(
+                metadata, {}, {}, {}, {}, {}, {},
+                annotation_status="skipped_no_annotation",
+                fragments_per_peak={"S2": []},
             )
 
     def test_build_report_data_models_intentional_skips_without_generic_missing_status(self):
@@ -915,6 +1260,14 @@ class DashboardOutputTests(unittest.TestCase):
             peak_widths={
                 "Z_TARGET": [{"width": 200, "peak_count": 2}],
             },
+            fragments_per_peak={
+                "Z_TARGET": [
+                    {
+                        "fragment_count": 4, "peak_count": 2,
+                        "chrom": "chr1", "peak_name": "must-not-export",
+                    },
+                ],
+            },
             motif_analysis_status="computed",
         )
         data["samples_by_id"]["Z_TARGET"]["warnings"].append(
@@ -924,6 +1277,175 @@ class DashboardOutputTests(unittest.TestCase):
             warning for sample in data["samples"] for warning in sample["warnings"]
         ]
         return data
+
+    def test_representative_fixture_renders_twelve_samples_and_all_approved_panels(self):
+        """The visual-QA fixture must exercise the complete offline dashboard."""
+        workspace = self.make_workspace()
+        output = workspace / "qc-dashboard-visual.html"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "tests" / "render_qc_dashboard_fixture.py"),
+                str(output),
+            ],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(output.is_file())
+        html_document = output.read_text(encoding="utf-8")
+        self.assertGreater(len(html_document), 10_000)
+        self.assertTrue(html_document.startswith("<!doctype html>"))
+        self.assertNotRegex(
+            html_document,
+            r'''(?:src|href)=["']https?://|url\(\s*["']?https?://''',
+        )
+        for sample_id in (
+            "701_IgG", "702_IgG", "703_IgG",
+            "701_CTCF", "702_CTCF", "703_CTCF",
+            "704_GATA1", "705_GATA1", "706_GATA1",
+            "704_RUNX1", "705_RUNX1", "706_RUNX1",
+        ):
+            with self.subTest(sample_id=sample_id):
+                self.assertIn(f">{sample_id}<", html_document)
+        for section_id in (
+            "demultiplexing", "alignment", "insert-size-distribution",
+            "peaks-frip", "peak-width-distribution", "tss-enrichment",
+            "motif-enrichment",
+        ):
+            with self.subTest(section_id=section_id):
+                self.assertIn(f'<section id="{section_id}">', html_document)
+        for panel_title in (
+            "Assigned read pairs", "Barcode balance within library",
+            "Mapped reads", "Usable fragments after filtering",
+            "PCR duplication", "End-to-end usable yield",
+            "Peak count", "Fraction of reads in peaks",
+            "Total bases covered by peaks", "Peak width median and range",
+            "Peak count vs usable fragments", "Fragments per peak",
+            "Insert-size distribution", "Peak-width distribution",
+            "TSS enrichment score", "TSS profiles",
+            "Motif enrichment heatmap",
+        ):
+            with self.subTest(panel_title=panel_title):
+                self.assertIn(panel_title, html_document)
+
+    def test_dashboard_derived_rows_use_approved_units_and_denominators(self):
+        """A wrong denominator or silent zero would misstate library yield."""
+        rows = qc.derive_dashboard_rows([
+            {
+                "sample_id": "S1",
+                "sample_assigned_reads": 50,
+                "sample_assignment_fraction": 0.625,
+                "mapped_percent": 82.9,
+                "mapq_filtered_fragments": 38,
+                "duplicate_percent": 12,
+                "peak_count": 4_321,
+                "frip": 0.25,
+                "total_covered_bases": 1_234_567,
+            },
+            {
+                "sample_id": "ZERO",
+                "sample_assigned_reads": 0,
+                "mapq_filtered_fragments": 0,
+            },
+            {
+                "sample_id": "MISSING",
+                "sample_assigned_reads": None,
+                "mapq_filtered_fragments": 10,
+            },
+        ])
+
+        self.assertEqual(rows[0]["assigned_read_pairs_millions"], 0.00005)
+        self.assertEqual(rows[0]["barcode_balance_percent"], 62.5)
+        self.assertEqual(rows[0]["usable_fragments_millions"], 0.000038)
+        self.assertEqual(rows[0]["end_to_end_yield_percent"], 76.0)
+        self.assertEqual(rows[0]["peak_count_thousands"], 4.321)
+        self.assertEqual(rows[0]["frip_percent"], 25.0)
+        self.assertEqual(rows[0]["covered_megabases"], 1.234567)
+        self.assertIsNone(rows[1]["end_to_end_yield_percent"])
+        self.assertIsNone(rows[2]["end_to_end_yield_percent"])
+
+    def test_dashboard_renders_all_approved_small_multiple_panels(self):
+        """Dropping a panel would remove one of the approved cohort QC views."""
+        data = self.report_data()
+        target = data["samples_by_id"]["Z_TARGET"]
+        control = data["samples_by_id"]["A_IGG"]
+        target["library"].update({
+            "mapped_percent": 82.9,
+            "mapq_filtered_fragments": 38,
+            "duplicate_percent": 12,
+        })
+        control["library"].update({
+            "mapped_percent": 75,
+            "mapq_filtered_fragments": 20,
+            "duplicate_percent": 8,
+        })
+        target["peak"].update({
+            "peak_count": 4_321,
+            "total_covered_bases": 1_234_567,
+            "width_min": 100,
+            "width_q25": 125,
+            "width_median": 170,
+            "width_q75": 210,
+            "width_max": 300,
+            "frip": 0.25,
+        })
+
+        dashboard = qc.render_dashboard(data)
+
+        for title in (
+            "Assigned read pairs",
+            "Barcode balance within library",
+            "Mapped reads",
+            "Usable fragments after filtering",
+            "PCR duplication",
+            "End-to-end usable yield",
+            "Peak count",
+            "Fraction of reads in peaks",
+            "Total bases covered by peaks",
+            "Peak width median and range",
+            "Peak count vs usable fragments",
+            "TSS enrichment score",
+        ):
+            self.assertIn(f"<h3>{title}</h3>", dashboard)
+        self.assertIn('aria-label="Sequencing and alignment QC panels"', dashboard)
+        self.assertIn('aria-label="Peak QC panels"', dashboard)
+        self.assertIn('aria-label="TSS score panel"', dashboard)
+
+    def test_technical_panels_include_controls_and_peak_panels_exclude_them(self):
+        """IgG is technical QC data, but it has no biological peak call."""
+        data = self.report_data()
+        data["samples_by_id"]["A_IGG"]["library"].update({
+            "mapped_percent": 75,
+            "mapq_filtered_fragments": 20,
+            "duplicate_percent": 8,
+        })
+        data["samples_by_id"]["Z_TARGET"]["peak"].update({
+            "peak_count": 1,
+            "total_covered_bases": 100,
+            "width_min": 50,
+            "width_q25": 60,
+            "width_median": 70,
+            "width_q75": 80,
+            "width_max": 90,
+            "frip": 0.2,
+        })
+
+        dashboard = qc.render_dashboard(data)
+        sequencing = dashboard[
+            dashboard.index('aria-label="Sequencing and alignment QC panels"'):
+            dashboard.index('id="insert-size-distribution"')
+        ]
+        peaks = dashboard[
+            dashboard.index('aria-label="Peak QC panels"'):
+            dashboard.index('aria-label="Peaks and FRiP table"')
+        ]
+
+        self.assertIn('data-assay-target="IgG"', sequencing)
+        self.assertNotIn('data-assay-target="IgG"', peaks)
 
     def test_serializers_use_stable_columns_and_json_null(self):
         """A rearranged or zero-filled summary would break downstream analysis."""
@@ -953,7 +1475,7 @@ class DashboardOutputTests(unittest.TestCase):
             },
         )
         self.assertEqual(payload["schema_version"], 1)
-        self.assertEqual(payload["generator_version"], "1.0.0")
+        self.assertEqual(payload["generator_version"], "1.1.0")
         self.assertEqual(
             payload["counts"],
             {"samples": 2, "targets": 1, "controls": 1, "warnings": 3},
@@ -982,6 +1504,9 @@ class DashboardOutputTests(unittest.TestCase):
             },
         )
         self.assertIsNone(payload["samples"][0]["peak"]["frip"])
+        self.assertIsNone(
+            payload["samples"][0]["peak"]["fragments_per_peak_distribution"]
+        )
         self.assertEqual(
             payload["metric_definitions"]["tss_enrichment"]["formula"],
             "center_bin_signal / mean(terminal_100bp_flanks)",
@@ -1028,13 +1553,204 @@ class DashboardOutputTests(unittest.TestCase):
             target["peak"]["width_distribution"],
             [{"width": 321, "peak_count": 7}],
         )
+        self.assertEqual(
+            target["peak"]["fragments_per_peak_distribution"],
+            [{"fragment_count": 4, "peak_count": 2}],
+        )
+        self.assertNotIn(
+            "chrom",
+            target["peak"]["fragments_per_peak_distribution"][0],
+        )
+        self.assertNotIn(
+            "peak_name",
+            target["peak"]["fragments_per_peak_distribution"][0],
+        )
         dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
         self.assertIn("Insert-size distribution", dashboard)
-        self.assertIn(">147<", dashboard)
-        self.assertIn(">23<", dashboard)
+        self.assertIn("250 bp bins", dashboard)
+        self.assertIn(">[0, 250)<", dashboard)
+        self.assertIn(">23.0<", dashboard)
         self.assertIn("Peak-width distribution", dashboard)
-        self.assertIn(">321<", dashboard)
-        self.assertIn(">7<", dashboard)
+        self.assertIn(">[250, 500)<", dashboard)
+        self.assertIn(">7.00<", dashboard)
+
+    def test_dashboard_bins_insert_and_peak_width_distributions_across_samples(self):
+        data = self.report_data()
+        data["samples_by_id"]["A_IGG"]["library"]["insert_size_distribution"] = [
+            {"insert_size": 10, "pair_count": 1},
+        ]
+        data["samples_by_id"]["Z_TARGET"]["library"]["insert_size_distribution"] = [
+            {"insert_size": 260, "pair_count": 1},
+            {"insert_size": 510, "pair_count": 2},
+        ]
+        data["samples_by_id"]["Z_TARGET"]["peak"]["width_distribution"] = [
+            {"width": 20, "peak_count": 1},
+            {"width": 260, "peak_count": 3},
+        ]
+
+        dashboard = qc.render_dashboard(data)
+
+        insert_section = dashboard[
+            dashboard.index('id="insert-size-distribution"'):
+            dashboard.index('id="peaks-frip"')
+        ]
+        self.assertIn("Percent of read pairs", insert_section)
+        self.assertIn(">[0, 250)<", insert_section)
+        self.assertIn(">[250, 500)<", insert_section)
+        self.assertIn(">[500, 750)<", insert_section)
+        self.assertIn(">100<", insert_section)
+        self.assertAlmostEqual(
+            sum(
+                float(value)
+                for value in re.findall(
+                    r'data-sample-id="Z_TARGET"[^>]*data-percent="([0-9.]+)"',
+                    insert_section,
+                )
+            ),
+            100.0,
+        )
+
+        width_section = dashboard[
+            dashboard.index('id="peak-width-distribution"'):
+            dashboard.index('id="tss-enrichment"')
+        ]
+        self.assertIn("Percent of peaks", width_section)
+        self.assertIn(">[0, 250)<", width_section)
+        self.assertIn(">[250, 500)<", width_section)
+
+    def test_dashboard_renders_fragments_per_peak_ecdf_and_target_colored_tss_profiles(self):
+        data = self.report_data()
+        data["samples_by_id"]["Z_TARGET"]["peak"][
+            "fragments_per_peak_distribution"
+        ] = [
+            {"fragment_count": 0, "peak_count": 2},
+            {"fragment_count": 1, "peak_count": 1},
+            {"fragment_count": 10, "peak_count": 1},
+        ]
+
+        dashboard = qc.render_dashboard(data)
+
+        peak_section = dashboard[
+            dashboard.index('id="peaks-frip"'):
+            dashboard.index('id="peak-width-distribution"')
+        ]
+        self.assertIn("<h3>Fragments per peak</h3>", peak_section)
+        self.assertIn("Cumulative percent of peaks", peak_section)
+        self.assertIn("50.0% of peaks have zero fragments", peak_section)
+        self.assertIn('data-zero-origin="true"', peak_section)
+
+        tss_section = dashboard[
+            dashboard.index('id="tss-enrichment"'):
+            dashboard.index('id="motif-enrichment"')
+        ]
+        self.assertIn("Mean coverage (RPKM)", tss_section)
+        self.assertIn('class="zero-reference"', tss_section)
+        self.assertIn('data-assay-target="CTCF"', tss_section)
+        self.assertIn('stroke="#2F78D1"', tss_section)
+        self.assertIn('class="endpoint-label"', tss_section)
+
+    def test_tss_score_panel_sorts_by_score_and_explains_the_calculation(self):
+        """TSS bars must rank scores and make the scalar definition visible."""
+        data = self.report_data()
+        data["samples_by_id"]["A_IGG"]["tss"]["enrichment"] = None
+
+        dashboard = qc.render_dashboard(data)
+        tss_section = dashboard[
+            dashboard.index('id="tss-enrichment"'):
+            dashboard.index('id="motif-enrichment"')
+        ]
+        score_panel = tss_section[
+            tss_section.index("<h3>TSS enrichment score</h3>"):
+            tss_section.index("<h3>TSS profiles</h3>")
+        ]
+
+        self.assertLess(score_panel.index("Z_TARGET"), score_panel.index("A_IGG"))
+        self.assertIn(
+            "center 0-bp bin signal divided by the mean signal across the "
+            "terminal 100-bp flank at each end of the profile",
+            tss_section,
+        )
+
+    def test_dashboard_renders_target_only_heatmap_and_displayed_cell_table(self):
+        data = self.report_data()
+        target = data["samples_by_id"]["Z_TARGET"]
+        records = [
+            {
+                "motif_id": f"MA_OTHER_{rank:02d}",
+                "motif_alt_id": f"OTHER{rank:02d}",
+                "rank": rank,
+                "adjusted_p_value": rank / 1000,
+                "p_value": rank / 100,
+                "effect": 2.0,
+                "positive_sequences": 4,
+            }
+            for rank in range(1, 12)
+        ]
+        target["ame_motifs"] = records
+        target["top_motifs"] = records[:10]
+        data["samples_by_id"]["A_IGG"]["ame_motifs"] = [{
+            "motif_id": "CONTROL_ONLY",
+            "motif_alt_id": "CONTROL",
+            "rank": 1,
+            "adjusted_p_value": 0,
+        }]
+
+        dashboard = qc.render_dashboard(data)
+        motif_section = dashboard[
+            dashboard.index('id="motif-enrichment"'):
+            dashboard.index('id="warnings"')
+        ]
+
+        self.assertIn('aria-label="Motif enrichment heatmap"', motif_section)
+        self.assertIn("MA_OTHER_11", motif_section)
+        self.assertNotIn("CONTROL_ONLY", motif_section)
+        self.assertNotIn(">A_IGG<", motif_section)
+        compact_table = re.search(
+            r'aria-label="Displayed motif cells table".*?</table>',
+            motif_section,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(compact_table)
+        self.assertEqual(compact_table.group().count("<tr>"), 12)
+        for heading in (
+            "Sample", "Motif", "Alternate ID", "Rank",
+            "AME adjusted significance", "−log10 AME adjusted significance",
+            "State", "Reason", "Cognate",
+        ):
+            self.assertIn(heading, compact_table.group())
+
+    def test_eleventh_heatmap_motif_does_not_expand_top_motifs_export(self):
+        workspace = self.make_workspace()
+        data = self.report_data()
+        records = [
+            {
+                "motif_id": f"MA_OTHER_{rank:02d}",
+                "motif_alt_id": f"OTHER{rank:02d}",
+                "rank": rank,
+                "adjusted_p_value": rank / 1000,
+                "p_value": rank / 100,
+                "effect": 2.0,
+                "positive_sequences": 4,
+            }
+            for rank in range(1, 12)
+        ]
+        data["samples_by_id"]["Z_TARGET"]["ame_motifs"] = records
+        data["samples_by_id"]["Z_TARGET"]["top_motifs"] = records
+
+        dashboard = qc.render_dashboard(data)
+        qc.write_top_motifs_tsv(data, workspace / "top_motifs.tsv")
+
+        motif_section = dashboard[
+            dashboard.index('id="motif-enrichment"'):
+            dashboard.index('id="warnings"')
+        ]
+        self.assertIn("MA_OTHER_11", motif_section)
+        with (workspace / "top_motifs.tsv").open(
+            encoding="utf-8", newline=""
+        ) as handle:
+            exported = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(len(exported), 10)
+        self.assertNotIn("MA_OTHER_11", {row["motif_id"] for row in exported})
 
     def test_tidy_exports_exclude_controls_limit_motifs_and_order_rows(self):
         """Controls must not leak into motif biology and sortable exports stay stable."""
@@ -1081,9 +1797,9 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertNotIn('class="qc-pass"', html)
         self.assertNotIn('class="qc-fail"', html)
         for visible_text in (
-            "NA", "Targets (solid)", "IgG controls (outlined)",
-            "Bar charts — Targets (solid)",
-            "Line charts use the per-series swatches",
+            "NA", "Bar charts — targets use assay colors",
+            "IgG controls use grey with heavier outlines",
+            "Line charts use target colors and sample-specific strokes",
             "CTCF &amp; &lt;target&gt;", "M01 &amp; &lt;motif&gt;",
             "NA warning &amp; &lt;visible&gt;",
         ):
@@ -1194,6 +1910,100 @@ class DashboardOutputTests(unittest.TestCase):
             ".table-scroll{max-width:100%;overflow-x:auto}",
             html,
         )
+
+    def test_dashboard_rounds_only_html_and_collapses_detailed_tables(self):
+        """Presentation compaction must not alter exact identifiers or raw exports."""
+        workspace = self.make_workspace()
+        data = self.report_data()
+        target = data["samples_by_id"]["Z_TARGET"]
+        target["demultiplex"].update({
+            "assigned_read_pairs": 17_432_100,
+            "assigned_fraction": 0.012345,
+        })
+        target["library"]["insert_size_distribution"] = [
+            {"insert_size": 260, "pair_count": 17_432_100},
+        ]
+        target["availability"]["insert_size"] = {
+            "status": "computed", "reason": None,
+        }
+
+        qc.write_outputs(data, workspace)
+
+        dashboard = (workspace / "qc_dashboard.html").read_text(encoding="utf-8")
+        self.assertIn(">17.4M<", dashboard)
+        self.assertIn(">0.0123<", dashboard)
+        self.assertIn("<details", dashboard)
+        self.assertIn(
+            "<summary>View binned insert-size data</summary>",
+            dashboard,
+        )
+        self.assertNotIn("<details open", dashboard)
+        self.assertIn(">Z_TARGET<", dashboard)
+        self.assertIn(">1<", dashboard)
+        self.assertIn(">[250, 500)<", dashboard)
+
+        with (workspace / "qc_summary.tsv").open(
+            encoding="utf-8", newline=""
+        ) as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        raw_target = next(row for row in rows if row["sample_id"] == "Z_TARGET")
+        self.assertEqual(raw_target["assigned_read_pairs"], "17432100")
+        self.assertEqual(raw_target["assigned_fraction"], "0.012345")
+
+        payload = json.loads(
+            (workspace / "qc_summary.json").read_text(encoding="utf-8")
+        )
+        json_target = next(
+            row for row in payload["samples"]
+            if row["sample_id"] == "Z_TARGET"
+        )
+        self.assertEqual(
+            json_target["demultiplex"]["assigned_read_pairs"],
+            17_432_100,
+        )
+        self.assertEqual(
+            json_target["demultiplex"]["assigned_fraction"],
+            0.012345,
+        )
+
+    def test_dashboard_version_and_responsive_layout_metadata(self):
+        """The redesigned HTML and producer record must identify version 1.1.0."""
+        dashboard_module = (
+            Path(__file__).parents[2] / "modules/local/qc_dashboard.nf"
+        ).read_text(encoding="utf-8")
+        rendered = qc.render_dashboard(self.report_data())
+
+        self.assertEqual(qc.SCHEMA_VERSION, 1)
+        self.assertEqual(qc.GENERATOR_VERSION, "1.1.0")
+        self.assertIn("qc_dashboard.py: 1.1.0", dashboard_module)
+        self.assertIn(".panel-grid{", rendered)
+        self.assertIn("@media (max-width:", rendered)
+        self.assertIn("@media print{", rendered)
+
+    def test_print_layout_stacks_panels_scales_svgs_and_keeps_details_collapsed(self):
+        """Printing must not clip wide charts or silently expand huge tables."""
+        rendered = qc.render_dashboard(self.report_data())
+        print_css = rendered[
+            rendered.index("@media print{"):
+            rendered.index("</style>")
+        ]
+
+        self.assertIn(
+            ".panel-grid{grid-template-columns:minmax(0,1fr)}",
+            print_css,
+        )
+        self.assertIn("svg{max-width:100%;height:auto}", print_css)
+        self.assertIn("break-before:page", print_css)
+        self.assertIn(
+            "details:not([open])>:not(summary){display:none!important}",
+            print_css,
+        )
+        self.assertNotIn(
+            "details:not([open])>:not(summary){display:block}",
+            print_css,
+        )
+        self.assertNotIn("IgG controls (outlined) and hatched", rendered)
+        self.assertIn("IgG controls use grey with heavier outlines", rendered)
 
     def test_dashboard_tables_have_unique_context_specific_accessible_names(self):
         """Assistive technology must distinguish every scrollable data region."""

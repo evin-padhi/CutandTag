@@ -4,22 +4,38 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import csv
 import html
 import json
 import math
 import os
+import re
 import shutil
 import statistics
 import tempfile
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Collection, Mapping, Sequence
 
 from motif_qc import read_ame
+from qc_dashboard_visuals import (
+    BarMetric,
+    bin_weighted_series,
+    format_significant,
+    histogram_ecdf,
+    render_bar_panel,
+    render_binned_distribution,
+    render_ecdf,
+    render_motif_heatmap,
+    render_panel_grid,
+    render_profile_chart,
+    render_range_panel,
+    render_scatter_panel,
+)
 
 
 SCHEMA_VERSION = 1
-GENERATOR_VERSION = "1.0.0"
+GENERATOR_VERSION = "1.1.0"
 TSS_BEFORE_BP = 3000
 TSS_BIN_SIZE = 10
 TSS_FLANK_BP = 100
@@ -519,6 +535,44 @@ def read_peak_width_distributions(
     return dict(sorted(records.items()))
 
 
+def read_fragments_per_peak_distributions(
+    paths: Sequence[Path],
+) -> dict[str, list[dict[str, int]]]:
+    """Compact strict per-peak producer rows into sample-keyed histograms."""
+    records: dict[str, list[dict[str, int]]] = {}
+    suffix = ".peak_qc.fragments_per_peak.tsv"
+    expected_fields = [
+        "chrom", "start", "end", "peak_name", "width", "score",
+        "signal_value", "fragment_count",
+    ]
+    for path in paths:
+        sample_id = _sample_id_from_filename(
+            path, suffix, label="fragments-per-peak distribution"
+        )
+        if sample_id in records:
+            raise DashboardInputError(
+                f"duplicate fragments-per-peak distribution sample_id {sample_id}"
+            )
+        headers, rows = _read_tsv(path, label="fragments-per-peak distribution")
+        if headers != expected_fields:
+            raise DashboardInputError(
+                f"{path}: fragments-per-peak distribution columns must exactly "
+                "match the producer schema"
+            )
+        counts = Counter(
+            _nonnegative_integer(
+                row["fragment_count"],
+                label=f"{path}:{row_number} fragment_count",
+            )
+            for row_number, row in enumerate(rows, start=2)
+        )
+        records[sample_id] = [
+            {"fragment_count": fragment_count, "peak_count": counts[fragment_count]}
+            for fragment_count in sorted(counts)
+        ]
+    return dict(sorted(records.items()))
+
+
 def read_tss_profile(
     path: Path, *, before_bp: int = TSS_BEFORE_BP, bin_size: int = TSS_BIN_SIZE
 ) -> list[tuple[int, float | None]]:
@@ -628,32 +682,274 @@ def calculate_tss_enrichment(
     return _tss_enrichment_result(profile, flank_bp=flank_bp)[0]
 
 
-def read_top_ame(path: Path, *, limit: int = TOP_MOTIF_LIMIT) -> list[dict[str, object]]:
-    """Return up to ``limit`` AME records in deterministic significance order."""
-    if limit < 0:
-        raise DashboardInputError("AME motif limit must be non-negative")
+def _ame_record_dict(record: object) -> dict[str, object]:
+    """Serialize one parsed AME record for dashboard data structures."""
+    return {
+        "motif_id": record.motif_id,
+        "motif_alt_id": record.motif_alt_id,
+        "adjusted_p_value": record.adjusted_p_value,
+        "p_value": record.p_value,
+        "effect": record.effect,
+        "positive_sequences": record.positive_sequences,
+        "rank": record.rank,
+    }
+
+
+def read_all_ame(path: Path) -> list[dict[str, object]]:
+    """Return all usable AME records in deterministic significance order."""
     try:
         records = read_ame(path)
     except ValueError as error:
         raise DashboardInputError(str(error)) from error
-    top = [record for record in records if record.motif_id != "__NO_PEAKS__"]
-    top.sort(key=lambda record: (
+    usable = [record for record in records if record.motif_id != "__NO_PEAKS__"]
+    usable.sort(key=lambda record: (
         record.adjusted_p_value,
         record.rank if record.rank is not None else math.inf,
         record.motif_id,
+        record.motif_alt_id,
     ))
-    return [
+    return [_ame_record_dict(record) for record in usable]
+
+
+def read_top_ame(path: Path, *, limit: int = TOP_MOTIF_LIMIT) -> list[dict[str, object]]:
+    """Return up to ``limit`` AME records in deterministic significance order."""
+    if limit < 0:
+        raise DashboardInputError("AME motif limit must be non-negative")
+    return read_all_ame(path)[:limit]
+
+
+def motif_tokens(*values: object) -> frozenset[str]:
+    """Return punctuation-delimited, case-insensitive motif tokens."""
+    return frozenset(
+        token
+        for value in values
+        if value is not None
+        for token in re.findall(r"[A-Za-z0-9]+", str(value).casefold())
+    )
+
+
+def is_cognate_motif(
+    expected_motif: object, motif_id: object, motif_alt_id: object
+) -> bool:
+    """Return whether the expected TF occurs as a complete motif token."""
+    expected_tokens = motif_tokens(expected_motif)
+    return bool(expected_tokens & motif_tokens(motif_id, motif_alt_id))
+
+
+def build_motif_heatmap(
+    samples: Sequence[Mapping[str, object]],
+    *,
+    noncognate_limit: int = 15,
+    significance_cap: float = 60.0,
+) -> dict[str, object]:
+    """Build a deterministic target-only AME significance matrix."""
+    targets = sorted(
+        (sample for sample in samples if not bool(sample.get("is_control"))),
+        key=lambda sample: str(sample.get("sample_id", "")),
+    )
+    sample_ids = [str(sample.get("sample_id", "")) for sample in targets]
+    sample_targets = {
+        str(sample.get("sample_id", "")): sample.get("assay_target")
+        for sample in targets
+    }
+    expected_motifs = sorted(
         {
-            "motif_id": record.motif_id,
-            "motif_alt_id": record.motif_alt_id,
-            "adjusted_p_value": record.adjusted_p_value,
-            "p_value": record.p_value,
-            "effect": record.effect,
-            "positive_sequences": record.positive_sequences,
-            "rank": record.rank,
-        }
-        for record in top[:limit]
+            str(sample.get("expected_motif")).strip()
+            for sample in targets
+            if motif_tokens(sample.get("expected_motif"))
+        },
+        key=lambda value: (value.casefold(), value),
+    )
+    records_by_sample: dict[
+        str, dict[tuple[str, str], Mapping[str, object]]
+    ] = {}
+    key_records: dict[tuple[str, str], list[Mapping[str, object]]] = {}
+    display_candidates: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    cognate_groups: dict[tuple[str, str], str] = {}
+
+    def display_key(record: Mapping[str, object]) -> tuple[str, str]:
+        return (
+            str(record.get("motif_id") or "").strip(),
+            str(record.get("motif_alt_id") or "").strip(),
+        )
+
+    def normalized_key(key: tuple[str, str]) -> tuple[str, str]:
+        return key[0].casefold(), key[1].casefold()
+
+    def record_priority(record: Mapping[str, object]) -> tuple[object, ...]:
+        adjusted = record.get("adjusted_p_value")
+        adjusted_sort = (
+            float(adjusted)
+            if isinstance(adjusted, (int, float))
+            and math.isfinite(float(adjusted))
+            else math.inf
+        )
+        rank = record.get("rank")
+        rank_sort = (
+            float(rank)
+            if isinstance(rank, (int, float)) and math.isfinite(float(rank))
+            else math.inf
+        )
+        key = display_key(record)
+        return adjusted_sort, rank_sort, key[1], key[0]
+
+    for sample in targets:
+        sample_id = str(sample.get("sample_id", ""))
+        sample_records: dict[tuple[str, str], Mapping[str, object]] = {}
+        raw_records = sample.get("ame_motifs", [])
+        if not isinstance(raw_records, Sequence) or isinstance(
+            raw_records, (str, bytes)
+        ):
+            raw_records = []
+        for record in raw_records:
+            if not isinstance(record, Mapping):
+                continue
+            display = display_key(record)
+            key = normalized_key(display)
+            current_record = sample_records.get(key)
+            if (
+                current_record is None
+                or record_priority(record) < record_priority(current_record)
+            ):
+                sample_records[key] = record
+            key_records.setdefault(key, []).append(record)
+            display_candidates.setdefault(key, set()).add(display)
+        records_by_sample[sample_id] = sample_records
+
+    display_by_key = {
+        key: min(
+            candidates,
+            key=lambda display: (
+                display[1].casefold(),
+                display[0].casefold(),
+                display[1],
+                display[0],
+            ),
+        )
+        for key, candidates in display_candidates.items()
+    }
+    for key, display in display_by_key.items():
+        matching_groups = [
+            expected.casefold()
+            for expected in expected_motifs
+            if is_cognate_motif(expected, *display)
+        ]
+        if matching_groups:
+            cognate_groups[key] = min(matching_groups)
+
+    forced_normalized_keys = sorted(
+        cognate_groups,
+        key=lambda key: (
+            cognate_groups[key],
+            display_by_key[key][1].casefold(),
+            display_by_key[key][0].casefold(),
+            display_by_key[key],
+        ),
+    )
+
+    def best_adjusted(key: tuple[str, str]) -> float:
+        values = []
+        for record in key_records[key]:
+            value = record.get("adjusted_p_value")
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                values.append(float(value))
+        return min(values) if values else math.inf
+
+    noncognate_normalized_keys = sorted(
+        (key for key in key_records if key not in cognate_groups),
+        key=lambda key: (
+            best_adjusted(key),
+            display_by_key[key][1].casefold(),
+            display_by_key[key][0].casefold(),
+            display_by_key[key],
+        ),
+    )[:noncognate_limit]
+    normalized_keys = [
+        *forced_normalized_keys, *noncognate_normalized_keys,
     ]
+    forced_cognate_keys = [
+        display_by_key[key] for key in forced_normalized_keys
+    ]
+    noncognate_keys = [
+        display_by_key[key] for key in noncognate_normalized_keys
+    ]
+    motif_keys = [display_by_key[key] for key in normalized_keys]
+    cells: dict[tuple[str, tuple[str, str]], dict[str, object]] = {}
+    for sample in targets:
+        sample_id = str(sample.get("sample_id", ""))
+        expected = sample.get("expected_motif")
+        motif = sample.get("motif")
+        ame_status = (
+            str(motif.get("ame_status") or "").strip()
+            if isinstance(motif, Mapping) else ""
+        )
+        for key in normalized_keys:
+            display = display_by_key[key]
+            record = records_by_sample[sample_id].get(key)
+            adjusted = (
+                record.get("adjusted_p_value")
+                if isinstance(record, Mapping) else None
+            )
+            significant = (
+                isinstance(adjusted, (int, float))
+                and math.isfinite(float(adjusted))
+                and 0 <= float(adjusted) <= 0.1
+            )
+            if significant and float(adjusted) == 0:
+                score = significance_cap
+                label = f">{format(significance_cap, 'g')}"
+            elif significant:
+                uncapped_score = -math.log10(float(adjusted))
+                score = min(uncapped_score, significance_cap)
+                label = (
+                    f">{format(significance_cap, 'g')}"
+                    if uncapped_score >= significance_cap
+                    else format(score, ".3g")
+                )
+            else:
+                score = 0.0
+                label = "ns"
+            adjusted_is_numeric = (
+                not isinstance(adjusted, bool)
+                and isinstance(adjusted, (int, float))
+                and math.isfinite(float(adjusted))
+            )
+            if isinstance(record, Mapping) and adjusted_is_numeric:
+                state = "computed"
+                reason = (
+                    "AME adjusted significance exceeds 0.1"
+                    if not significant else ""
+                )
+            elif isinstance(record, Mapping):
+                state = "unavailable"
+                reason = "AME adjusted significance unavailable"
+            elif ame_status == "no_peaks":
+                state = "no_peaks"
+                reason = "AME unavailable because no peaks were called"
+            elif not ame_status or ame_status == "computed":
+                state = "missing_motif"
+                reason = "motif absent from AME results"
+            else:
+                state = "unavailable"
+                reason = f"AME unavailable: {ame_status}"
+            cells[(sample_id, display)] = {
+                "score": score,
+                "label": label,
+                "adjusted_p_value": adjusted,
+                "rank": record.get("rank") if isinstance(record, Mapping) else None,
+                "outlined": is_cognate_motif(expected, *display),
+                "state": state,
+                "reason": reason,
+            }
+
+    return {
+        "sample_ids": sample_ids,
+        "sample_targets": sample_targets,
+        "motif_keys": motif_keys,
+        "forced_cognate_keys": forced_cognate_keys,
+        "noncognate_keys": noncognate_keys,
+        "cells": cells,
+    }
 
 
 def _family_state(status: str, reason: str | None = None) -> dict[str, object]:
@@ -668,7 +964,11 @@ def _empty_sample(record: Mapping[str, object]) -> dict[str, object]:
         "sample_kind": "control" if record["is_control"] else "target",
         "demultiplex": {field: None for field in DEMULTIPLEX_FIELDS},
         "library": {"insert_size_distribution": None},
-        "peak": {"frip": None, "width_distribution": None},
+        "peak": {
+            "frip": None,
+            "width_distribution": None,
+            "fragments_per_peak_distribution": None,
+        },
         "tss": {
             "status": None, "enrichment": None, "profile": None,
             "score_status": None,
@@ -683,6 +983,7 @@ def _empty_sample(record: Mapping[str, object]) -> dict[str, object]:
             family: _family_state("missing", "not_evaluated")
             for family in FAMILY_NAMES
         },
+        "ame_motifs": [],
         "top_motifs": [],
         "warnings": [],
     }
@@ -762,6 +1063,10 @@ def build_report_data(
     *,
     insert_sizes: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     peak_widths: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
+    fragments_per_peak: (
+        Mapping[str, Sequence[Mapping[str, object]]] | None
+    ) = None,
+    ame_motifs: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     motif_analysis_status: str = "auto",
 ) -> dict[str, object]:
     """Initialize optional QC families, then overlay validated sample metrics."""
@@ -771,7 +1076,7 @@ def build_report_data(
         raise DashboardInputError(f"unsupported annotation status {annotation_status}")
     if motif_analysis_status == "auto":
         motif_analysis_status = (
-            "computed" if motifs or top_motifs else "skipped_no_database"
+            "computed" if motifs or top_motifs or ame_motifs else "skipped_no_database"
         )
     if motif_analysis_status not in {"computed", "skipped_no_database"}:
         raise DashboardInputError(
@@ -779,12 +1084,16 @@ def build_report_data(
         )
     insert_sizes = {} if insert_sizes is None else insert_sizes
     peak_widths = {} if peak_widths is None else peak_widths
+    fragments_per_peak = {} if fragments_per_peak is None else fragments_per_peak
+    ame_motifs = {} if ame_motifs is None else ame_motifs
     samples_by_id = {sample_id: _empty_sample(record) for sample_id, record in metadata.items()}
     sample_ids = set(samples_by_id)
     for family_name, family in (("library", libraries), ("peak", peaks), ("tss", tss),
                                 ("motif", motifs), ("top motifs", top_motifs),
                                 ("insert-size", insert_sizes),
-                                ("peak-width", peak_widths)):
+                                ("peak-width", peak_widths),
+                                ("fragments-per-peak", fragments_per_peak),
+                                ("AME motifs", ame_motifs)):
         unknown = sorted(set(family) - sample_ids)
         if unknown:
             raise DashboardInputError(f"{family_name} metrics reference unknown sample_id {unknown[0]}")
@@ -900,6 +1209,10 @@ def build_report_data(
                     sample, "peak_width", "missing",
                     f"{sample_id}: missing peak-width distribution",
                 )
+            if sample_id in fragments_per_peak:
+                sample["peak"]["fragments_per_peak_distribution"] = [
+                    dict(row) for row in fragments_per_peak[sample_id]
+                ]
 
         if annotation_status == "skipped_no_annotation":
             sample["tss"]["status"] = "skipped_no_annotation"
@@ -979,6 +1292,9 @@ def build_report_data(
             sample["top_motifs"] = [
                 dict(item) for item in top_motifs.get(sample_id, ())
             ]
+            sample["ame_motifs"] = [
+                dict(item) for item in ame_motifs.get(sample_id, ())
+            ]
     samples = [samples_by_id[sample_id] for sample_id in sorted(samples_by_id)]
     warnings = [warning for sample in samples for warning in sample["warnings"]]
     target_count = sum(not bool(sample["is_control"]) for sample in samples)
@@ -1051,6 +1367,66 @@ def _summary_row(sample: Mapping[str, object]) -> dict[str, object]:
     warnings = sample.get("warnings", [])
     row["warning_count"] = len(warnings) if isinstance(warnings, list) else 0
     return {key: row.get(key) for key in QC_SUMMARY_COLUMNS}
+
+
+def derive_dashboard_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Add presentation-unit metrics without changing machine-readable values."""
+
+    def optional_number(value: object) -> float | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if math.isfinite(number) and number >= 0 else None
+
+    derived: list[dict[str, object]] = []
+    for source in rows:
+        row = dict(source)
+        sample_assigned_reads = optional_number(source.get("sample_assigned_reads"))
+        assignment_fraction = optional_number(
+            source.get("sample_assignment_fraction")
+        )
+        usable_fragments = optional_number(source.get("mapq_filtered_fragments"))
+        peak_count = optional_number(source.get("peak_count"))
+        frip = optional_number(source.get("frip"))
+        covered_bases = optional_number(source.get("total_covered_bases"))
+        row.update({
+            "assigned_read_pairs_millions": (
+                sample_assigned_reads / 1_000_000
+                if sample_assigned_reads is not None else None
+            ),
+            "barcode_balance_percent": (
+                100 * assignment_fraction
+                if assignment_fraction is not None else None
+            ),
+            "usable_fragments_millions": (
+                usable_fragments / 1_000_000
+                if usable_fragments is not None else None
+            ),
+            "end_to_end_yield_percent": (
+                100 * usable_fragments / sample_assigned_reads
+                if (
+                    usable_fragments is not None
+                    and sample_assigned_reads is not None
+                    and sample_assigned_reads > 0
+                )
+                else None
+            ),
+            "peak_count_thousands": (
+                peak_count / 1_000 if peak_count is not None else None
+            ),
+            "frip_percent": 100 * frip if frip is not None else None,
+            "covered_megabases": (
+                covered_bases / 1_000_000
+                if covered_bases is not None else None
+            ),
+        })
+        derived.append(row)
+    return derived
 
 
 def _machine_tsv_value(value: object) -> str:
@@ -1133,6 +1509,9 @@ def _public_sample(sample: Mapping[str, object]) -> dict[str, object]:
         if isinstance(insert_distribution, list) else None
     )
     width_distribution = peak.get("width_distribution")
+    fragments_per_peak_distribution = peak.get(
+        "fragments_per_peak_distribution"
+    )
     public_peak = _project(peak, PEAK_FIELDS)
     public_peak["width_distribution"] = (
         [
@@ -1141,6 +1520,17 @@ def _public_sample(sample: Mapping[str, object]) -> dict[str, object]:
             if isinstance(row, Mapping)
         ]
         if isinstance(width_distribution, list) else None
+    )
+    public_peak["fragments_per_peak_distribution"] = (
+        [
+            {
+                "fragment_count": row.get("fragment_count"),
+                "peak_count": row.get("peak_count"),
+            }
+            for row in fragments_per_peak_distribution
+            if isinstance(row, Mapping)
+        ]
+        if isinstance(fragments_per_peak_distribution, list) else None
     )
     top_motifs = sample.get("top_motifs", [])
     warnings = sample.get("warnings", [])
@@ -1255,6 +1645,46 @@ def write_top_motifs_tsv(data: Mapping[str, object], path: Path) -> None:
     _write_tsv(path, TOP_MOTIF_COLUMNS, _top_motif_rows(data))
 
 
+def _motif_heatmap_rows(matrix: Mapping[str, object]) -> list[dict[str, object]]:
+    """Return one compact supporting row for every displayed matrix cell."""
+    sample_ids = matrix.get("sample_ids", [])
+    motif_keys = matrix.get("motif_keys", [])
+    cells = matrix.get("cells", {})
+    if (
+        not isinstance(sample_ids, Sequence)
+        or isinstance(sample_ids, (str, bytes))
+        or not isinstance(motif_keys, Sequence)
+        or isinstance(motif_keys, (str, bytes))
+        or not isinstance(cells, Mapping)
+    ):
+        return []
+
+    rows: list[dict[str, object]] = []
+    for sample_id in sample_ids:
+        for motif_key in motif_keys:
+            if (
+                not isinstance(motif_key, Sequence)
+                or isinstance(motif_key, (str, bytes))
+                or len(motif_key) != 2
+            ):
+                continue
+            display_key = (str(motif_key[0]), str(motif_key[1]))
+            raw_cell = cells.get((str(sample_id), display_key), {})
+            cell = raw_cell if isinstance(raw_cell, Mapping) else {}
+            rows.append({
+                "sample_id": sample_id,
+                "motif_id": display_key[0],
+                "motif_alt_id": display_key[1],
+                "rank": cell.get("rank"),
+                "adjusted_p_value": cell.get("adjusted_p_value"),
+                "transformed_significance": cell.get("score"),
+                "state": cell.get("state"),
+                "reason": cell.get("reason"),
+                "cognate": bool(cell.get("outlined")),
+            })
+    return rows
+
+
 def _tss_profile_rows(data: Mapping[str, object]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for sample in _samples(data):
@@ -1281,7 +1711,8 @@ def write_tss_profiles_tsv(data: Mapping[str, object], path: Path) -> None:
 
 
 def render_table(
-    columns, rows, *, empty_message, aria_label, row_limit: int | None = None
+    columns, rows, *, empty_message, aria_label, row_limit: int | None = None,
+    exact_keys: Collection[str] = (),
 ):
     """Render an escaped HTML table, including an explicit empty-state message."""
     all_rows = list(rows)
@@ -1292,7 +1723,11 @@ def render_table(
     body = "".join(
         "<tr>"
         + "".join(
-            f"<td>{html.escape(format_value(row.get(key)))}</td>"
+            "<td>"
+            + html.escape(
+                format_significant(row.get(key), exact=key in exact_keys)
+            )
+            + "</td>"
             for key, _ in columns
         )
         + "</tr>"
@@ -1312,6 +1747,18 @@ def render_table(
             "</p>"
         )
     return table
+
+
+def render_data_details(
+    title: str, content: str, *, open_by_default: bool = False
+) -> str:
+    """Collapse a detailed data region without removing it from the document."""
+    open_attribute = " open" if open_by_default else ""
+    return (
+        f'<details class="data-details"{open_attribute}>'
+        f"<summary>{html.escape(title)}</summary>"
+        f"{content}</details>"
+    )
 
 
 def render_bar_chart(
@@ -1646,7 +2093,16 @@ def _section(section_id: str, title: str, content: str) -> str:
 def render_dashboard(data: Mapping[str, object]) -> str:
     """Return a self-contained descriptive dashboard with inline SVG and tables."""
     samples = _samples(data)
-    summary_rows = [_summary_row(sample) for sample in samples]
+    series_metadata = {
+        str(sample.get("sample_id", "")): {
+            "assay_target": sample.get("assay_target"),
+            "is_control": sample.get("is_control"),
+        }
+        for sample in samples
+    }
+    summary_rows = derive_dashboard_rows(
+        [_summary_row(sample) for sample in samples]
+    )
     target_count = sum(not bool(sample.get("is_control")) for sample in samples)
     control_count = len(samples) - target_count
     counts = (
@@ -1665,6 +2121,11 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         [{**sample, "annotation_status": data.get("annotation_status")} for sample in samples],
         empty_message="No samples were supplied",
         aria_label="Run overview table",
+        exact_keys={
+            "sample_id", "library_id", "input_group", "assay_target",
+            "sample_kind", "control_id", "expected_motif",
+            "annotation_status",
+        },
     )
     aggregate_availability = _aggregate_availability(samples)
     availability_rows = [
@@ -1682,134 +2143,393 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         availability_rows,
         empty_message="No input-family availability was recorded",
         aria_label="Input-family availability table",
+        exact_keys={"family", "status"},
     )
-    demux = render_bar_chart("Assigned read-pair fraction", summary_rows, value_key="assigned_fraction", axis_label="Fraction")
-    demux += render_table(
-        [("sample_id", "Sample"), ("total_read_pairs", "Total read pairs"),
-         ("assigned_read_pairs", "Assigned read pairs"),
-         ("ambiguous_read_pairs", "Ambiguous read pairs"),
-         ("unassigned_read_pairs", "Unassigned read pairs"),
-         ("assigned_fraction", "Assigned fraction"),
-         ("ambiguous_fraction", "Ambiguous fraction"),
-         ("unassigned_fraction", "Unassigned fraction"),
-         ("sample_assigned_reads", "Sample assigned reads"),
-         ("sample_assignment_fraction", "Sample assignment fraction")],
-        summary_rows, empty_message="No demultiplexing metrics available",
-        aria_label="Demultiplexing metrics table",
+    technical_metrics = (
+        BarMetric(
+            "assigned_read_pairs_millions",
+            "Assigned read pairs",
+            "Assigned pairs (millions)",
+        ),
+        BarMetric(
+            "barcode_balance_percent",
+            "Barcode balance within library",
+            "%",
+        ),
+        BarMetric("mapped_percent", "Mapped reads", "%"),
+        BarMetric(
+            "usable_fragments_millions",
+            "Usable fragments after filtering",
+            "Fragments (millions)",
+            log10_axis=True,
+        ),
+        BarMetric("duplicate_percent", "PCR duplication", "%"),
+        BarMetric(
+            "end_to_end_yield_percent",
+            "End-to-end usable yield",
+            "%",
+        ),
     )
-    alignment = render_bar_chart("Mapped reads", summary_rows, value_key="mapped_percent", axis_label="Percent")
-    alignment += render_table(
-        [("sample_id", "Sample"), ("raw_total_reads", "Raw reads"),
-         ("mapped_percent", "Mapped (%)"),
-         ("properly_paired_percent", "Properly paired (%)"),
-         ("mapq_filtered_reads", "MAPQ reads"),
-         ("mapq_filtered_fragments", "MAPQ fragments"),
-         ("mapq_filtered_fraction", "MAPQ fraction"),
-         ("markdup_examined_reads", "Examined reads"),
-         ("duplicate_total", "Duplicate reads"),
-         ("duplicate_percent", "Duplicate (%)"),
-         ("mitochondrial_percent", "Mitochondrial (%)"),
-         ("estimated_library_size", "Estimated library size"),
-         ("insert_size_total_pairs", "Insert pairs"),
-         ("insert_size_min", "Insert min"), ("insert_size_q25", "Insert Q25"),
-         ("insert_size_mean", "Insert mean"),
-         ("insert_size_median", "Insert median"),
-         ("insert_size_q75", "Insert Q75"), ("insert_size_max", "Insert max")],
-        summary_rows, empty_message="No alignment metrics available",
-        aria_label="Alignment and library QC table",
+    technical_grid = render_panel_grid(
+        [
+            render_bar_panel(
+                metric.title,
+                summary_rows,
+                value_key=metric.key,
+                axis_label=metric.axis_label,
+                value_multiplier=metric.value_multiplier,
+                log10_axis=metric.log10_axis,
+            )
+            for metric in technical_metrics
+        ],
+        aria_label="Sequencing and alignment QC panels",
     )
-    insert_rows: list[dict[str, object]] = []
+    demux = technical_grid + (
+        '<p class="panel-note">Barcode balance is each barcode&apos;s share '
+        'of assigned reads in its physical library. End-to-end usable yield '
+        'is MAPQ-filtered fragments divided by sample-assigned reads; '
+        'undefined denominators are shown as NA.</p>'
+    )
+    demux += render_data_details(
+        "View demultiplexing metrics",
+        render_table(
+            [("sample_id", "Sample"), ("total_read_pairs", "Total read pairs"),
+             ("assigned_read_pairs", "Assigned read pairs"),
+             ("ambiguous_read_pairs", "Ambiguous read pairs"),
+             ("unassigned_read_pairs", "Unassigned read pairs"),
+             ("assigned_fraction", "Assigned fraction"),
+             ("ambiguous_fraction", "Ambiguous fraction"),
+             ("unassigned_fraction", "Unassigned fraction"),
+             ("sample_assigned_reads", "Sample assigned reads"),
+             ("sample_assignment_fraction", "Sample assignment fraction")],
+            summary_rows, empty_message="No demultiplexing metrics available",
+            aria_label="Demultiplexing metrics table",
+            exact_keys={"sample_id"},
+        ),
+    )
+    alignment = render_data_details(
+        "View alignment and library metrics",
+        render_table(
+            [("sample_id", "Sample"), ("raw_total_reads", "Raw reads"),
+             ("mapped_percent", "Mapped (%)"),
+             ("properly_paired_percent", "Properly paired (%)"),
+             ("mapq_filtered_reads", "MAPQ reads"),
+             ("mapq_filtered_fragments", "MAPQ fragments"),
+             ("mapq_filtered_fraction", "MAPQ fraction"),
+             ("markdup_examined_reads", "Examined reads"),
+             ("duplicate_total", "Duplicate reads"),
+             ("duplicate_percent", "Duplicate (%)"),
+             ("mitochondrial_percent", "Mitochondrial (%)"),
+             ("estimated_library_size", "Estimated library size"),
+             ("insert_size_total_pairs", "Insert pairs"),
+             ("insert_size_min", "Insert min"), ("insert_size_q25", "Insert Q25"),
+             ("insert_size_mean", "Insert mean"),
+             ("insert_size_median", "Insert median"),
+             ("insert_size_q75", "Insert Q75"), ("insert_size_max", "Insert max")],
+            summary_rows, empty_message="No alignment metrics available",
+            aria_label="Alignment and library QC table",
+            exact_keys={"sample_id"},
+        ),
+    )
+    insert_weighted: dict[str, list[tuple[int, int]]] = {}
     for sample in samples:
         distribution = _nested(sample, "library").get("insert_size_distribution")
         if not isinstance(distribution, list):
             continue
+        sample_id = str(sample.get("sample_id", ""))
+        observations: list[tuple[int, int]] = []
         for row in distribution:
             if isinstance(row, Mapping):
-                insert_rows.append({
-                    "sample_id": sample.get("sample_id"),
-                    "is_control": sample.get("is_control"),
-                    "insert_size": row.get("insert_size"),
-                    "pair_count": row.get("pair_count"),
-                })
-    insert = render_distribution_chart(
-        "Insert-size distribution", insert_rows,
-        x_key="insert_size", value_key="pair_count",
-        x_axis_label="Insert size (bp)", y_axis_label="Read pairs",
+                insert_size = row.get("insert_size")
+                pair_count = row.get("pair_count")
+                if isinstance(insert_size, int) and isinstance(pair_count, int):
+                    observations.append((insert_size, pair_count))
+        insert_weighted[sample_id] = observations
+    insert_binned = bin_weighted_series(insert_weighted, bin_size=250)
+    insert = render_binned_distribution(
+        "Insert-size distribution",
+        insert_binned,
+        series_metadata,
+        x_axis_label="Insert size (bp)",
     )
-    insert += render_table(
-        [("sample_id", "Sample"), ("insert_size", "Insert size (bp)"),
-         ("pair_count", "Read pairs")],
-        insert_rows, empty_message="No insert-size distribution data available",
-        aria_label="Insert-size distribution table",
-        row_limit=2000,
+    insert += (
+        '<p class="panel-note">Insert-size and peak-width distributions use '
+        'shared 250 bp bins across all samples.</p>'
+    )
+    insert_rows = [
+        {
+            "sample_id": sample_id,
+            "bin": f'[{row["bin_start"]}, {row["bin_end"]})',
+            "pair_count": row["count"],
+            "percent": row["percent"],
+        }
+        for sample_id, rows in insert_binned.items()
+        for row in rows
+    ]
+    insert += render_data_details(
+        "View binned insert-size data",
+        render_table(
+            [("sample_id", "Sample"), ("bin", "Insert-size bin (bp)"),
+             ("pair_count", "Read pairs"), ("percent", "Percent")],
+            insert_rows,
+            empty_message="No insert-size distribution data available",
+            aria_label="Insert-size distribution table",
+            row_limit=2000,
+            exact_keys={"sample_id", "bin"},
+        ),
     )
     peak_rows = [row for row in summary_rows if not row.get("is_control")]
-    peaks = render_bar_chart("FRiP", peak_rows, value_key="frip", axis_label="FRiP")
-    peaks += render_table(
-        [("sample_id", "Sample"), ("peak_count", "Peak count"),
-         ("total_covered_bases", "Covered bases"),
-         ("peak_width_min", "Width min"), ("peak_width_q25", "Width Q25"),
-         ("peak_width_mean", "Width mean"),
-         ("peak_width_median", "Width median"),
-         ("peak_width_q75", "Width Q75"), ("peak_width_max", "Width max"),
-         ("total_fragments", "Usable fragments"),
-         ("fragments_in_peaks", "Fragments in peaks"), ("frip", "FRiP")],
-        summary_rows, empty_message="No peak metrics available",
-        aria_label="Peaks and FRiP table",
+    peak_grid = render_panel_grid(
+        [
+            render_bar_panel(
+                "Peak count",
+                peak_rows,
+                value_key="peak_count_thousands",
+                axis_label="Peaks (thousands)",
+            ),
+            render_bar_panel(
+                "Fraction of reads in peaks",
+                peak_rows,
+                value_key="frip_percent",
+                axis_label="%",
+            ),
+            render_bar_panel(
+                "Total bases covered by peaks",
+                peak_rows,
+                value_key="covered_megabases",
+                axis_label="Covered bases (Mb)",
+            ),
+            render_range_panel(
+                "Peak width median and range",
+                peak_rows,
+                minimum_key="peak_width_min",
+                q25_key="peak_width_q25",
+                median_key="peak_width_median",
+                q75_key="peak_width_q75",
+                maximum_key="peak_width_max",
+                axis_label="Peak width (bp)",
+            ),
+            render_scatter_panel(
+                "Peak count vs usable fragments",
+                peak_rows,
+                x_key="usable_fragments_millions",
+                y_key="peak_count_thousands",
+                x_axis_label="Usable fragments (millions)",
+                y_axis_label="Peaks (thousands)",
+                x_log10_axis=True,
+            ),
+        ],
+        aria_label="Peak QC panels",
     )
-    peak_width_rows: list[dict[str, object]] = []
+    peaks = peak_grid
+    fragments_per_peak_series: dict[str, list[dict[str, float | int]]] = {}
+    zero_peak_notes = []
+    for sample in samples:
+        if bool(sample.get("is_control")):
+            continue
+        sample_id = str(sample.get("sample_id", ""))
+        distribution = _nested(sample, "peak").get(
+            "fragments_per_peak_distribution"
+        )
+        if not isinstance(distribution, list):
+            continue
+        histogram = []
+        for row in distribution:
+            if not isinstance(row, Mapping):
+                continue
+            fragment_count = row.get("fragment_count")
+            peak_count = row.get("peak_count")
+            if isinstance(fragment_count, int) and isinstance(peak_count, int):
+                histogram.append((fragment_count, peak_count))
+        ecdf = histogram_ecdf(histogram)
+        fragments_per_peak_series[sample_id] = ecdf
+        total_peaks = sum(count for _, count in histogram)
+        zero_peaks = sum(count for value, count in histogram if value == 0)
+        if total_peaks:
+            zero_percent = 100.0 * zero_peaks / total_peaks
+            zero_peak_notes.append(
+                f"{html.escape(sample_id)}: "
+                f"{html.escape(format_significant(zero_percent, compact=False))}% "
+                "of peaks have zero fragments"
+            )
+    fragments_per_peak_panel = render_ecdf(
+        "Fragments per peak",
+        fragments_per_peak_series,
+        series_metadata,
+        x_axis_label="Fragments per peak",
+        zero_origin=True,
+    )
+    if zero_peak_notes:
+        fragments_per_peak_panel += (
+            '<p class="panel-note">'
+            + "; ".join(zero_peak_notes)
+            + ".</p>"
+        )
+    peaks += fragments_per_peak_panel
+    peaks += render_data_details(
+        "View peaks and FRiP metrics",
+        render_table(
+            [("sample_id", "Sample"), ("peak_count", "Peak count"),
+             ("total_covered_bases", "Covered bases"),
+             ("peak_width_min", "Width min"), ("peak_width_q25", "Width Q25"),
+             ("peak_width_mean", "Width mean"),
+             ("peak_width_median", "Width median"),
+             ("peak_width_q75", "Width Q75"), ("peak_width_max", "Width max"),
+             ("total_fragments", "Usable fragments"),
+             ("fragments_in_peaks", "Fragments in peaks"), ("frip", "FRiP")],
+            summary_rows, empty_message="No peak metrics available",
+            aria_label="Peaks and FRiP table",
+            exact_keys={"sample_id"},
+        ),
+    )
+    peak_width_weighted: dict[str, list[tuple[int, int]]] = {}
     for sample in samples:
         distribution = _nested(sample, "peak").get("width_distribution")
         if not isinstance(distribution, list):
             continue
+        sample_id = str(sample.get("sample_id", ""))
+        observations: list[tuple[int, int]] = []
         for row in distribution:
             if isinstance(row, Mapping):
-                peak_width_rows.append({
-                    "sample_id": sample.get("sample_id"),
-                    "is_control": sample.get("is_control"),
-                    "width": row.get("width"),
-                    "peak_count": row.get("peak_count"),
-                })
-    peak_width = render_distribution_chart(
-        "Peak-width distribution", peak_width_rows,
-        x_key="width", value_key="peak_count",
-        x_axis_label="Peak width (bp)", y_axis_label="Peaks",
+                width = row.get("width")
+                peak_count = row.get("peak_count")
+                if isinstance(width, int) and isinstance(peak_count, int):
+                    observations.append((width, peak_count))
+        peak_width_weighted[sample_id] = observations
+    peak_width_binned = bin_weighted_series(peak_width_weighted, bin_size=250)
+    peak_width = render_binned_distribution(
+        "Peak-width distribution",
+        peak_width_binned,
+        series_metadata,
+        x_axis_label="Peak width (bp)",
     )
-    peak_width += render_table(
-        [("sample_id", "Sample"), ("width", "Peak width (bp)"),
-         ("peak_count", "Peaks")],
-        peak_width_rows, empty_message="No peak-width distribution data available",
-        aria_label="Peak-width distribution table",
-        row_limit=2000,
+    peak_width_rows = [
+        {
+            "sample_id": sample_id,
+            "bin": f'[{row["bin_start"]}, {row["bin_end"]})',
+            "peak_count": row["count"],
+            "percent": row["percent"],
+        }
+        for sample_id, rows in peak_width_binned.items()
+        for row in rows
+    ]
+    peak_width += render_data_details(
+        "View binned peak-width data",
+        render_table(
+            [("sample_id", "Sample"), ("bin", "Peak-width bin (bp)"),
+             ("peak_count", "Peaks"), ("percent", "Percent")],
+            peak_width_rows,
+            empty_message="No peak-width distribution data available",
+            aria_label="Peak-width distribution table",
+            row_limit=2000,
+            exact_keys={"sample_id", "bin"},
+        ),
     )
     profiles = {
-        str(sample.get("sample_id", "")): {
-            "profile": _nested(sample, "tss").get("profile", []),
-            "is_control": sample.get("is_control"),
-        }
+        str(sample.get("sample_id", "")): _nested(sample, "tss").get("profile", [])
         for sample in samples if isinstance(_nested(sample, "tss").get("profile"), Sequence)
     }
-    tss = render_line_chart("TSS profiles", profiles)
-    tss += render_table(
-        [("sample_id", "Sample"), ("tss_status", "Status"), ("tss_enrichment", "TSS enrichment")],
-        summary_rows, empty_message="No TSS metrics available",
-        aria_label="TSS enrichment table",
+    def tss_score_sort(row: Mapping[str, object]) -> tuple[object, ...]:
+        raw_score = row.get("tss_enrichment")
+        score = (
+            float(raw_score)
+            if (
+                not isinstance(raw_score, bool)
+                and isinstance(raw_score, (int, float))
+                and math.isfinite(float(raw_score))
+            )
+            else None
+        )
+        return (
+            score is None,
+            -score if score is not None else 0.0,
+            str(row.get("sample_id", "")),
+        )
+
+    tss_rows = sorted(summary_rows, key=tss_score_sort)
+    tss = render_panel_grid(
+        [
+            render_bar_panel(
+                "TSS enrichment score",
+                tss_rows,
+                value_key="tss_enrichment",
+                axis_label="TSS enrichment score",
+            ),
+        ],
+        aria_label="TSS score panel",
+    )
+    tss += (
+        '<p class="panel-note">TSS enrichment is the center 0-bp bin signal '
+        'divided by the mean signal across the terminal 100-bp flank at each '
+        'end of the profile.</p>'
+    )
+    tss += render_profile_chart(
+        "TSS profiles",
+        profiles,
+        series_metadata,
+        x_axis_label="Position relative to TSS (bp)",
+        y_axis_label="Mean coverage (RPKM)",
+    )
+    tss += render_data_details(
+        "View TSS enrichment data",
+        render_table(
+            [("sample_id", "Sample"), ("tss_status", "Status"),
+             ("tss_enrichment", "TSS enrichment")],
+            tss_rows, empty_message="No TSS metrics available",
+            aria_label="TSS enrichment table",
+            exact_keys={"sample_id", "tss_status"},
+        ),
     )
     motif_rows = _top_motif_rows(data)
-    expected = render_table(
-        [("sample_id", "Sample"), ("expected_motif", "Expected motif"),
-         ("expected_motif_status", "Expected motif status"),
-         ("best_motif_id", "Best motif"),
-         ("best_adjusted_p_value", "Best adjusted significance"),
-         ("ame_status", "AME status")],
-        peak_rows, empty_message="No target motif metrics available",
-        aria_label="Expected motif table",
+    motif_matrix = build_motif_heatmap(samples)
+    expected = render_motif_heatmap(motif_matrix)
+    expected += render_data_details(
+        "View displayed motif cells",
+        render_table(
+            [("sample_id", "Sample"), ("motif_id", "Motif"),
+             ("motif_alt_id", "Alternate ID"), ("rank", "Rank"),
+             ("adjusted_p_value", "AME adjusted significance"),
+             (
+                 "transformed_significance",
+                 "−log10 AME adjusted significance",
+             ),
+             ("state", "State"), ("reason", "Reason"),
+             ("cognate", "Cognate")],
+            _motif_heatmap_rows(motif_matrix),
+            empty_message="No displayed motif cells available",
+            aria_label="Displayed motif cells table",
+            exact_keys={
+                "sample_id", "motif_id", "motif_alt_id", "rank",
+                "state", "reason", "cognate",
+            },
+        ),
     )
-    expected += "<h3>Top AME motifs</h3>" + render_table(
-        [("sample_id", "Sample"), ("rank", "Rank"), ("motif_id", "Motif"),
-         ("motif_alt_id", "Alternate ID"), ("adjusted_p_value", "Adjusted p-value")],
-        motif_rows, empty_message="No AME motifs available",
-        aria_label="Top AME motifs table",
+    expected += render_data_details(
+        "View expected motif summary",
+        render_table(
+            [("sample_id", "Sample"), ("expected_motif", "Expected motif"),
+             ("expected_motif_status", "Expected motif status"),
+             ("best_motif_id", "Best motif"),
+             ("best_adjusted_p_value", "Best adjusted significance"),
+             ("ame_status", "AME status")],
+            peak_rows, empty_message="No target motif metrics available",
+            aria_label="Expected motif table",
+            exact_keys={
+                "sample_id", "expected_motif", "expected_motif_status",
+                "best_motif_id", "ame_status",
+            },
+        ),
+    )
+    expected += render_data_details(
+        "View top AME motifs",
+        render_table(
+            [("sample_id", "Sample"), ("rank", "Rank"), ("motif_id", "Motif"),
+             ("motif_alt_id", "Alternate ID"),
+             ("adjusted_p_value", "AME adjusted significance")],
+            motif_rows, empty_message="No AME motifs available",
+            aria_label="Top AME motifs table",
+            exact_keys={"sample_id", "rank", "motif_id", "motif_alt_id"},
+        ),
     )
     warnings = data.get("warnings", [])
     warning_rows = warnings if isinstance(warnings, list) else []
@@ -1818,12 +2538,14 @@ def render_dashboard(data: Mapping[str, object]) -> str:
          ("status", "Status"), ("message", "Warning")],
         warning_rows, empty_message="No warnings recorded",
         aria_label="Warnings table",
+        exact_keys={"sample_id", "family", "status", "message"},
     )
     body = "".join((
         _section("run-overview", "Run overview", counts + overview),
         _section("input-availability", "Input-family availability", availability),
-        '<p class="legend">Bar charts — Targets (solid); IgG controls (outlined) '
-        'and hatched. Line charts use the per-series swatches.</p>',
+        '<p class="legend">Bar charts — targets use assay colors; IgG controls '
+        'use grey with heavier outlines. Line charts use target colors and '
+        'sample-specific strokes shown in each plot.</p>',
         _section("demultiplexing", "Demultiplexing", demux),
         _section("alignment", "Alignment and library QC", alignment),
         _section("insert-size-distribution", "Insert-size distribution", insert),
@@ -1836,8 +2558,12 @@ def render_dashboard(data: Mapping[str, object]) -> str:
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Consolidated QC dashboard</title><style>
-body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1100px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
-.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}.table-note{color:#475569;font-size:.9rem}
+body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1400px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
+.chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.panel-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin:.75rem 0}.qc-panel{min-width:0;border:1px solid #dbe3ee;border-radius:.4rem;padding:.75rem;background:#fff}.qc-panel h3{font-size:1rem;margin-bottom:.35rem}.panel-scroll{max-width:100%;overflow-x:auto}.panel-chart{display:block;height:auto}.axis-grid{stroke:#dbe3ee;stroke-width:1}.axis-tick-label{fill:#475569;font-size:11px}.axis-title{fill:#334155;font-size:12px}.bar-value,.scatter-label{font-size:11px;font-weight:600}.sample-label{font-size:10px}.range-min-max,.range-iqr,.range-median,.scatter-leader,.scatter-point{vector-effect:non-scaling-stroke}.panel-note,.table-note{color:#475569;font-size:.9rem}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}
+.heatmap-scroll{max-width:100%;overflow-x:auto}.motif-heatmap{display:block;width:auto;min-width:100%;height:auto}.heatmap-cell{stroke:#dbe3ee;stroke-width:1}.heatmap-cell.cognate{stroke:#172033;stroke-width:3}.heatmap-sample-label{font-size:11px;font-weight:700}.heatmap-motif-label{font-size:11px}.heatmap-cell-label{font-size:10px;font-weight:600;pointer-events:none}.heatmap-legend-title,.heatmap-legend-tick{font-size:11px}.data-details{margin:.75rem 0}.data-details summary{cursor:pointer;font-weight:700}.table-scroll:focus-visible,.panel-scroll:focus-visible,.chart-scroll:focus-visible,.heatmap-scroll:focus-visible,.data-details summary:focus-visible{outline:3px solid #2563eb;outline-offset:2px}
+@media (max-width:900px){.panel-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:640px){main{padding:.75rem}.panel-grid{grid-template-columns:minmax(0,1fr)}section{padding:.75rem}}
+@media print{body{background:#fff}main{max-width:none;padding:0}.panel-grid{grid-template-columns:minmax(0,1fr)}svg{max-width:100%;height:auto}.panel-chart,.motif-heatmap,.chart-wide{width:100%;min-width:0;max-width:100%;height:auto}section{break-inside:auto;page-break-inside:auto}#demultiplexing,#insert-size-distribution,#peaks-frip,#peak-width-distribution,#tss-enrichment,#motif-enrichment{break-before:page;page-break-before:always}.qc-panel,.panel-scroll,.chart-scroll,.heatmap-scroll{break-inside:avoid;page-break-inside:avoid}.table-scroll,.panel-scroll,.chart-scroll,.heatmap-scroll{overflow:visible}details:not([open])>:not(summary){display:none!important}.data-details summary{display:list-item}}
 </style></head><body><main><h1>Consolidated QC dashboard</h1><p>Descriptive technical and biological QC summary; no biological thresholds are applied.</p>""" + body + "</main></body></html>"
 
 
@@ -2021,14 +2747,30 @@ def _sample_id_for_ame(path: Path) -> str:
     return path.parent.parent.name if path.parent.name == "ame" else path.parent.name
 
 
-def _read_top_motifs_from_directory(directory: Path) -> dict[str, list[dict[str, object]]]:
-    records: dict[str, list[dict[str, object]]] = {}
+def _read_ame_motifs_from_directory(
+    directory: Path,
+) -> tuple[
+    dict[str, list[dict[str, object]]],
+    dict[str, list[dict[str, object]]],
+]:
+    """Read each AME result once and return complete and bounded mappings."""
+    complete: dict[str, list[dict[str, object]]] = {}
     for path in _input_paths(directory, "ame.tsv", label="AME"):
         sample_id = _sample_id_for_ame(path)
-        if not sample_id or sample_id in records:
+        if not sample_id or sample_id in complete:
             raise DashboardInputError(f"duplicate AME sample_id {sample_id}")
-        records[sample_id] = read_top_ame(path)
-    return dict(sorted(records.items()))
+        complete[sample_id] = read_all_ame(path)
+    complete = dict(sorted(complete.items()))
+    top = {
+        sample_id: records[:TOP_MOTIF_LIMIT]
+        for sample_id, records in complete.items()
+    }
+    return complete, top
+
+
+def _read_top_motifs_from_directory(directory: Path) -> dict[str, list[dict[str, object]]]:
+    """Compatibility wrapper returning the bounded AME mapping."""
+    return _read_ame_motifs_from_directory(directory)[1]
 
 
 def _build_argument_parser() -> argparse.ArgumentParser:
@@ -2076,16 +2818,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.peak_dir, "*.peak_qc.width_histogram.tsv", label="peak"
             )
         )
+        fragments_per_peak = read_fragments_per_peak_distributions(
+            _input_paths(
+                args.peak_dir,
+                "*.peak_qc.fragments_per_peak.tsv",
+                label="peak",
+            )
+        )
         tss = _read_tss_metrics(args.tss_dir)
         motifs = _read_motif_metrics(
             _input_paths(args.motif_dir, "*.motif_qc.tsv", label="motif")
         )
-        top_motifs = _read_top_motifs_from_directory(args.ame_dir)
+        ame_motifs, top_motifs = _read_ame_motifs_from_directory(args.ame_dir)
         data = build_report_data(
             metadata, demultiplex, libraries, peaks, tss, motifs, top_motifs,
             annotation_status=args.annotation_status,
             insert_sizes=insert_sizes,
             peak_widths=peak_widths,
+            fragments_per_peak=fragments_per_peak,
+            ame_motifs=ame_motifs,
             motif_analysis_status=args.motif_analysis_status,
         )
         write_outputs_atomically(data, args.outdir)

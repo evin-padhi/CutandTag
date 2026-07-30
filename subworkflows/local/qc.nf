@@ -321,6 +321,12 @@ workflow QC {
             [files: holder.files + [path]]
         }
         .map { holder -> holder.files }
+    peak_fragment_count_files = PEAK_QC.out.qc
+        .map { meta, json, tsv, histogram, perPeak -> perPeak }
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     motif_metric_files = MOTIF_QC_CUSTOM.out.custom
         .map { meta, custom -> custom }
         .reduce([files: []]) { holder, path ->
@@ -407,6 +413,7 @@ workflow QC {
         insert_size_files,
         peak_qc_files,
         peak_width_histogram_files,
+        peak_fragment_count_files,
         tss_profile_data_files,
         tss_status_files,
         motif_metric_files,
