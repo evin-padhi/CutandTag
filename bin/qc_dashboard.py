@@ -26,6 +26,7 @@ from qc_dashboard_visuals import (
     render_bar_panel,
     render_binned_distribution,
     render_ecdf,
+    render_motif_heatmap,
     render_panel_grid,
     render_profile_chart,
     render_range_panel,
@@ -747,6 +748,10 @@ def build_motif_heatmap(
         key=lambda sample: str(sample.get("sample_id", "")),
     )
     sample_ids = [str(sample.get("sample_id", "")) for sample in targets]
+    sample_targets = {
+        str(sample.get("sample_id", "")): sample.get("assay_target")
+        for sample in targets
+    }
     expected_motifs = sorted(
         {
             str(sample.get("expected_motif")).strip()
@@ -898,11 +903,13 @@ def build_motif_heatmap(
                 "score": score,
                 "label": label,
                 "adjusted_p_value": adjusted,
+                "rank": record.get("rank") if isinstance(record, Mapping) else None,
                 "outlined": is_cognate_motif(expected, *display),
             }
 
     return {
         "sample_ids": sample_ids,
+        "sample_targets": sample_targets,
         "motif_keys": motif_keys,
         "forced_cognate_keys": forced_cognate_keys,
         "noncognate_keys": noncognate_keys,
@@ -1601,6 +1608,44 @@ def _top_motif_rows(data: Mapping[str, object]) -> list[dict[str, object]]:
 def write_top_motifs_tsv(data: Mapping[str, object], path: Path) -> None:
     """Write at most ten rank-sorted AME motifs for every target sample."""
     _write_tsv(path, TOP_MOTIF_COLUMNS, _top_motif_rows(data))
+
+
+def _motif_heatmap_rows(matrix: Mapping[str, object]) -> list[dict[str, object]]:
+    """Return one compact supporting row for every displayed matrix cell."""
+    sample_ids = matrix.get("sample_ids", [])
+    motif_keys = matrix.get("motif_keys", [])
+    cells = matrix.get("cells", {})
+    if (
+        not isinstance(sample_ids, Sequence)
+        or isinstance(sample_ids, (str, bytes))
+        or not isinstance(motif_keys, Sequence)
+        or isinstance(motif_keys, (str, bytes))
+        or not isinstance(cells, Mapping)
+    ):
+        return []
+
+    rows: list[dict[str, object]] = []
+    for sample_id in sample_ids:
+        for motif_key in motif_keys:
+            if (
+                not isinstance(motif_key, Sequence)
+                or isinstance(motif_key, (str, bytes))
+                or len(motif_key) != 2
+            ):
+                continue
+            display_key = (str(motif_key[0]), str(motif_key[1]))
+            raw_cell = cells.get((str(sample_id), display_key), {})
+            cell = raw_cell if isinstance(raw_cell, Mapping) else {}
+            rows.append({
+                "sample_id": sample_id,
+                "motif_id": display_key[0],
+                "motif_alt_id": display_key[1],
+                "rank": cell.get("rank"),
+                "adjusted_p_value": cell.get("adjusted_p_value"),
+                "transformed_significance": cell.get("score"),
+                "cognate": bool(cell.get("outlined")),
+            })
+    return rows
 
 
 def _tss_profile_rows(data: Mapping[str, object]) -> list[dict[str, object]]:
@@ -2322,7 +2367,19 @@ def render_dashboard(data: Mapping[str, object]) -> str:
         aria_label="TSS enrichment table",
     )
     motif_rows = _top_motif_rows(data)
-    expected = render_table(
+    motif_matrix = build_motif_heatmap(samples)
+    expected = render_motif_heatmap(motif_matrix)
+    expected += "<h3>Displayed motif cells</h3>" + render_table(
+        [("sample_id", "Sample"), ("motif_id", "Motif"),
+         ("motif_alt_id", "Alternate ID"), ("rank", "Rank"),
+         ("adjusted_p_value", "Adjusted p-value"),
+         ("transformed_significance", "Transformed significance"),
+         ("cognate", "Cognate")],
+        _motif_heatmap_rows(motif_matrix),
+        empty_message="No displayed motif cells available",
+        aria_label="Displayed motif cells table",
+    )
+    expected += "<h3>Expected motif summary</h3>" + render_table(
         [("sample_id", "Sample"), ("expected_motif", "Expected motif"),
          ("expected_motif_status", "Expected motif status"),
          ("best_motif_id", "Best motif"),
@@ -2364,6 +2421,7 @@ def render_dashboard(data: Mapping[str, object]) -> str:
 <title>Consolidated QC dashboard</title><style>
 body{font-family:system-ui,sans-serif;line-height:1.45;margin:0;color:#172033;background:#f8fafc}main{max-width:1100px;margin:auto;padding:1.5rem}section{background:#fff;border:1px solid #dbe3ee;border-radius:.5rem;padding:1rem;margin:1rem 0}h1,h2,h3{margin-top:0}.legend,.empty{color:#475569}.table-scroll{max-width:100%;overflow-x:auto}table{border-collapse:collapse;width:100%;margin:.75rem 0}th,td{border:1px solid #dbe3ee;padding:.35rem;text-align:left;vertical-align:top}th{background:#eff6ff}.chart{width:100%;height:auto;background:#fff}.axis{stroke:#64748b}.chart-title{font-weight:700}
 .chart-scroll{max-width:100%;overflow-x:auto}.chart-wide{width:auto;min-width:100%;max-width:none}.panel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,24rem),1fr));gap:1rem;margin:.75rem 0}.qc-panel{min-width:0;border:1px solid #dbe3ee;border-radius:.4rem;padding:.75rem;background:#fff}.qc-panel h3{font-size:1rem;margin-bottom:.35rem}.panel-scroll{max-width:100%;overflow-x:auto}.panel-chart{display:block;height:auto}.axis-grid{stroke:#dbe3ee;stroke-width:1}.axis-tick-label{fill:#475569;font-size:11px}.axis-title{fill:#334155;font-size:12px}.bar-value,.scatter-label{font-size:11px;font-weight:600}.sample-label{font-size:10px}.range-min-max,.range-iqr,.range-median,.scatter-leader,.scatter-point{vector-effect:non-scaling-stroke}.panel-note,.table-note{color:#475569;font-size:.9rem}.series-legend{display:grid;grid-template-columns:repeat(auto-fit,minmax(18rem,1fr));gap:.25rem 1rem;padding-left:1.5rem}.series-swatch{width:2.5rem;height:.75rem;vertical-align:middle;margin-right:.35rem}.series-key{display:inline-block;min-width:2.5rem;font-weight:700}.series-label{font-family:ui-monospace,monospace}.run-counts{font-size:1.05rem}
+.heatmap-scroll{max-width:100%;overflow-x:auto}.motif-heatmap{display:block;width:auto;min-width:100%;height:auto}.heatmap-cell{stroke:#dbe3ee;stroke-width:1}.heatmap-cell.cognate{stroke:#172033;stroke-width:3}.heatmap-sample-label{font-size:11px;font-weight:700}.heatmap-motif-label{font-size:11px}.heatmap-cell-label{font-size:10px;font-weight:600;pointer-events:none}.heatmap-legend-title,.heatmap-legend-tick{font-size:11px}
 </style></head><body><main><h1>Consolidated QC dashboard</h1><p>Descriptive technical and biological QC summary; no biological thresholds are applied.</p>""" + body + "</main></body></html>"
 
 

@@ -207,6 +207,156 @@ def pack_endpoint_labels(
     return {label: position for (label, _), position in zip(ordered, positions)}
 
 
+def _heatmap_fill(score: float) -> str:
+    """Interpolate the heatmap's white-to-blue scale at a capped 0–60 score."""
+    fraction = min(max(score, 0.0), 60.0) / 60.0
+    start = (255, 255, 255)
+    end = (29, 78, 216)
+    channels = tuple(
+        round(start_channel + fraction * (end_channel - start_channel))
+        for start_channel, end_channel in zip(start, end)
+    )
+    return "#" + "".join(f"{channel:02X}" for channel in channels)
+
+
+def render_motif_heatmap(matrix: Mapping[str, object]) -> str:
+    """Render a target-only AME significance matrix as an accessible SVG."""
+    raw_sample_ids = matrix.get("sample_ids", [])
+    raw_motif_keys = matrix.get("motif_keys", [])
+    raw_cells = matrix.get("cells", {})
+    if (
+        not isinstance(raw_sample_ids, Sequence)
+        or isinstance(raw_sample_ids, (str, bytes))
+        or not isinstance(raw_motif_keys, Sequence)
+        or isinstance(raw_motif_keys, (str, bytes))
+        or not isinstance(raw_cells, Mapping)
+    ):
+        raw_sample_ids, raw_motif_keys, raw_cells = [], [], {}
+
+    sample_ids = [str(sample_id) for sample_id in raw_sample_ids]
+    motif_keys = [
+        (str(motif_key[0]), str(motif_key[1]))
+        for motif_key in raw_motif_keys
+        if (
+            isinstance(motif_key, Sequence)
+            and not isinstance(motif_key, (str, bytes))
+            and len(motif_key) == 2
+        )
+    ]
+    if not sample_ids or not motif_keys:
+        return (
+            '<div class="heatmap-scroll" role="region" '
+            'aria-label="Motif enrichment heatmap" tabindex="0">'
+            '<p class="empty" role="status">No motif enrichment data available.</p>'
+            "</div>"
+        )
+
+    raw_targets = matrix.get("sample_targets", {})
+    sample_targets = raw_targets if isinstance(raw_targets, Mapping) else {}
+    cell_width = 64.0
+    cell_height = 34.0
+    row_label_width = 210.0
+    top = 142.0
+    right = 24.0
+    legend_height = 66.0
+    width = row_label_width + cell_width * len(sample_ids) + right
+    height = top + cell_height * len(motif_keys) + legend_height
+
+    sample_labels = []
+    for column, sample_id in enumerate(sample_ids):
+        x = row_label_width + (column + 0.5) * cell_width
+        target = sample_targets.get(sample_id, sample_id.rsplit("_", 1)[-1])
+        color = target_color(target)
+        sample_labels.append(
+            f'<text class="heatmap-sample-label" x="{x:.1f}" y="{top - 12:.1f}" '
+            f'fill="{color}" text-anchor="start" '
+            f'transform="rotate(-55 {x:.1f} {top - 12:.1f})">'
+            f"{html.escape(sample_id)}</text>"
+        )
+
+    row_labels = []
+    cells = []
+    for row, motif_key in enumerate(motif_keys):
+        motif_id, motif_alt_id = motif_key
+        y = top + row * cell_height
+        display_label = (
+            f"{motif_alt_id} ({motif_id})" if motif_alt_id else motif_id
+        )
+        row_labels.append(
+            f'<text class="heatmap-motif-label" x="{row_label_width - 10:.1f}" '
+            f'y="{y + cell_height / 2 + 4:.1f}" text-anchor="end">'
+            f"{html.escape(display_label)}</text>"
+        )
+        for column, sample_id in enumerate(sample_ids):
+            raw_cell = raw_cells.get((sample_id, motif_key), {})
+            cell = raw_cell if isinstance(raw_cell, Mapping) else {}
+            numeric_score = _numeric(cell.get("score"))
+            score = min(max(numeric_score or 0.0, 0.0), 60.0)
+            adjusted = cell.get("adjusted_p_value")
+            label = str(cell.get("label", "ns"))
+            cognate = bool(cell.get("outlined"))
+            x = row_label_width + column * cell_width
+            adjusted_label = (
+                _exact_number(float(adjusted))
+                if _numeric(adjusted) is not None else "NA"
+            )
+            accessible_name = (
+                f"{sample_id}; {motif_id} {motif_alt_id}".rstrip()
+                + f"; adjusted p-value {adjusted_label}"
+                + f"; −log10 adjusted p-value {_exact_number(score)}"
+                + f"; {'cognate' if cognate else 'noncognate'}"
+            )
+            cell_class = "heatmap-cell cognate" if cognate else "heatmap-cell"
+            text_color = "#FFFFFF" if score >= 36.0 else "#172033"
+            cells.append(
+                f'<g class="heatmap-cell-group" '
+                f'aria-label="{html.escape(accessible_name, quote=True)}">'
+                f"<title>{html.escape(accessible_name)}</title>"
+                f'<rect class="{cell_class}" x="{x:.1f}" y="{y:.1f}" '
+                f'width="{cell_width:.1f}" height="{cell_height:.1f}" '
+                f'fill="{_heatmap_fill(score)}"/>'
+                f'<text class="heatmap-cell-label" '
+                f'x="{x + cell_width / 2:.1f}" '
+                f'y="{y + cell_height / 2 + 4:.1f}" '
+                f'fill="{text_color}" text-anchor="middle">'
+                f"{html.escape(label, quote=False).replace('&gt;', '>')}</text>"
+                "</g>"
+            )
+
+    legend_y = top + cell_height * len(motif_keys) + 22.0
+    legend_x = row_label_width
+    legend_width = min(240.0, cell_width * len(sample_ids))
+    legend = (
+        '<defs><linearGradient id="motif-significance-gradient">'
+        '<stop offset="0%" stop-color="#FFFFFF"/>'
+        '<stop offset="100%" stop-color="#1D4ED8"/>'
+        "</linearGradient></defs>"
+        f'<text class="heatmap-legend-title" x="{legend_x:.1f}" '
+        f'y="{legend_y:.1f}">−log10 adjusted p-value (capped at 60)</text>'
+        f'<rect class="heatmap-legend" x="{legend_x:.1f}" '
+        f'y="{legend_y + 10:.1f}" width="{legend_width:.1f}" height="12" '
+        'fill="url(#motif-significance-gradient)"/>'
+        f'<text class="heatmap-legend-tick" x="{legend_x:.1f}" '
+        f'y="{legend_y + 38:.1f}">0</text>'
+        f'<text class="heatmap-legend-tick" '
+        f'x="{legend_x + legend_width:.1f}" y="{legend_y + 38:.1f}" '
+        'text-anchor="end">60</text>'
+    )
+    return (
+        '<div class="heatmap-scroll" role="region" '
+        'aria-label="Motif enrichment heatmap" tabindex="0">'
+        f'<svg class="motif-heatmap" width="{width:.0f}" '
+        f'viewBox="0 0 {width:.0f} {height:.0f}" role="img" '
+        'aria-label="Motif enrichment heatmap" data-cell-width="64">'
+        "<title>Motif enrichment heatmap</title>"
+        + "".join(sample_labels)
+        + "".join(row_labels)
+        + "".join(cells)
+        + legend
+        + "</svg></div>"
+    )
+
+
 @dataclass(frozen=True)
 class BarMetric:
     """Declarative configuration for one dashboard bar-chart metric."""

@@ -1544,6 +1544,86 @@ class DashboardOutputTests(unittest.TestCase):
         self.assertIn('stroke="#2F78D1"', tss_section)
         self.assertIn('class="endpoint-label"', tss_section)
 
+    def test_dashboard_renders_target_only_heatmap_and_displayed_cell_table(self):
+        data = self.report_data()
+        target = data["samples_by_id"]["Z_TARGET"]
+        records = [
+            {
+                "motif_id": f"MA_OTHER_{rank:02d}",
+                "motif_alt_id": f"OTHER{rank:02d}",
+                "rank": rank,
+                "adjusted_p_value": rank / 1000,
+                "p_value": rank / 100,
+                "effect": 2.0,
+                "positive_sequences": 4,
+            }
+            for rank in range(1, 12)
+        ]
+        target["ame_motifs"] = records
+        target["top_motifs"] = records[:10]
+        data["samples_by_id"]["A_IGG"]["ame_motifs"] = [{
+            "motif_id": "CONTROL_ONLY",
+            "motif_alt_id": "CONTROL",
+            "rank": 1,
+            "adjusted_p_value": 0,
+        }]
+
+        dashboard = qc.render_dashboard(data)
+        motif_section = dashboard[
+            dashboard.index('id="motif-enrichment"'):
+            dashboard.index('id="warnings"')
+        ]
+
+        self.assertIn('aria-label="Motif enrichment heatmap"', motif_section)
+        self.assertIn("MA_OTHER_11", motif_section)
+        self.assertNotIn("CONTROL_ONLY", motif_section)
+        self.assertNotIn(">A_IGG<", motif_section)
+        compact_table = re.search(
+            r'aria-label="Displayed motif cells table".*?</table>',
+            motif_section,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(compact_table)
+        self.assertEqual(compact_table.group().count("<tr>"), 12)
+        for heading in (
+            "Sample", "Motif", "Alternate ID", "Rank",
+            "Adjusted p-value", "Transformed significance", "Cognate",
+        ):
+            self.assertIn(heading, compact_table.group())
+
+    def test_eleventh_heatmap_motif_does_not_expand_top_motifs_export(self):
+        workspace = self.make_workspace()
+        data = self.report_data()
+        records = [
+            {
+                "motif_id": f"MA_OTHER_{rank:02d}",
+                "motif_alt_id": f"OTHER{rank:02d}",
+                "rank": rank,
+                "adjusted_p_value": rank / 1000,
+                "p_value": rank / 100,
+                "effect": 2.0,
+                "positive_sequences": 4,
+            }
+            for rank in range(1, 12)
+        ]
+        data["samples_by_id"]["Z_TARGET"]["ame_motifs"] = records
+        data["samples_by_id"]["Z_TARGET"]["top_motifs"] = records
+
+        dashboard = qc.render_dashboard(data)
+        qc.write_top_motifs_tsv(data, workspace / "top_motifs.tsv")
+
+        motif_section = dashboard[
+            dashboard.index('id="motif-enrichment"'):
+            dashboard.index('id="warnings"')
+        ]
+        self.assertIn("MA_OTHER_11", motif_section)
+        with (workspace / "top_motifs.tsv").open(
+            encoding="utf-8", newline=""
+        ) as handle:
+            exported = list(csv.DictReader(handle, delimiter="\t"))
+        self.assertEqual(len(exported), 10)
+        self.assertNotIn("MA_OTHER_11", {row["motif_id"] for row in exported})
+
     def test_tidy_exports_exclude_controls_limit_motifs_and_order_rows(self):
         """Controls must not leak into motif biology and sortable exports stay stable."""
         workspace = self.make_workspace()

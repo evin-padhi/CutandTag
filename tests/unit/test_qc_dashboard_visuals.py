@@ -83,6 +83,97 @@ class EndpointLabelPackingTests(unittest.TestCase):
             )
 
 
+class MotifHeatmapRenderingTests(unittest.TestCase):
+    def matrix(self):
+        motif_keys = [
+            ("MA0139.1", "CTCF"),
+            ("MA0000.1", "OTHER"),
+        ]
+        return {
+            "sample_ids": ["NX701_CTCF", "NX704_GATA1"],
+            "sample_targets": {
+                "NX701_CTCF": "CTCF",
+                "NX704_GATA1": "GATA1",
+            },
+            "motif_keys": motif_keys,
+            "forced_cognate_keys": [motif_keys[0]],
+            "noncognate_keys": [motif_keys[1]],
+            "cells": {
+                ("NX701_CTCF", motif_keys[0]): {
+                    "score": 60.0,
+                    "label": ">60",
+                    "adjusted_p_value": 0,
+                    "outlined": True,
+                },
+                ("NX704_GATA1", motif_keys[0]): {
+                    "score": 0.0,
+                    "label": "ns",
+                    "adjusted_p_value": 0.1256789,
+                    "outlined": False,
+                },
+                ("NX701_CTCF", motif_keys[1]): {
+                    "score": 3.0,
+                    "label": "3",
+                    "adjusted_p_value": 0.001,
+                    "outlined": False,
+                },
+                ("NX704_GATA1", motif_keys[1]): {
+                    "score": 0.0,
+                    "label": "ns",
+                    "adjusted_p_value": None,
+                    "outlined": False,
+                },
+            },
+        }
+
+    def test_heatmap_renders_capped_significance_cognates_and_scroll_region(self):
+        heatmap = visuals.render_motif_heatmap(self.matrix())
+
+        self.assertIn('aria-label="Motif enrichment heatmap"', heatmap)
+        self.assertIn('class="heatmap-cell cognate"', heatmap)
+        self.assertIn(">60<", heatmap)
+        self.assertIn(">ns<", heatmap)
+        self.assertIn("−log10 adjusted p-value (capped at 60)", heatmap)
+        self.assertIn('class="heatmap-scroll"', heatmap)
+        self.assertIn('data-cell-width="64"', heatmap)
+
+    def test_heatmap_has_target_colored_labels_and_unique_accessible_cells(self):
+        heatmap = visuals.render_motif_heatmap(self.matrix())
+
+        self.assertRegex(
+            heatmap,
+            r'class="heatmap-sample-label"[^>]*fill="#2F78D1"[^>]*'
+            r'>NX701_CTCF<',
+        )
+        self.assertRegex(
+            heatmap,
+            r'class="heatmap-sample-label"[^>]*fill="#1FAE7A"[^>]*'
+            r'>NX704_GATA1<',
+        )
+        titles = re.findall(r'<title>([^<]+)</title>', heatmap)
+        cell_titles = [
+            title for title in titles if title.startswith(("NX701_", "NX704_"))
+        ]
+        self.assertEqual(len(cell_titles), 4)
+        self.assertEqual(len(cell_titles), len(set(cell_titles)))
+        self.assertIn(
+            "NX704_GATA1; MA0139.1 CTCF; adjusted p-value 0.1256789; "
+            "−log10 adjusted p-value 0; noncognate",
+            cell_titles,
+        )
+
+    def test_heatmap_empty_state_is_explicit(self):
+        heatmap = visuals.render_motif_heatmap({
+            "sample_ids": [],
+            "sample_targets": {},
+            "motif_keys": [],
+            "cells": {},
+        })
+
+        self.assertIn('role="status"', heatmap)
+        self.assertIn("No motif enrichment data available", heatmap)
+
+
 class DistributionRenderingTests(unittest.TestCase):
     def metadata(self):
         return {
