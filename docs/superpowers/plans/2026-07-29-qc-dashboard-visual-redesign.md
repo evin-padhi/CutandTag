@@ -1020,7 +1020,6 @@ Run:
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
   -s tests/unit -p 'test_*.py' -q
-bash tests/integration/test_manifest.sh
 bash tests/integration/test_demultiplex.sh
 bash tests/integration/test_alignment.sh
 bash tests/integration/test_peaks.sh
