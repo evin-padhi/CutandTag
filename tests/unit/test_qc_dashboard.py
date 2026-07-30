@@ -490,6 +490,24 @@ class TssAndAmeTests(unittest.TestCase):
         self.assertEqual(profile[300], (0, 12.0))
         self.assertEqual(qc.calculate_tss_enrichment(profile), 6.0)
 
+    def test_read_tss_profile_accepts_deeptools_decimal_bin_axis(self):
+        """deepTools 3.5.5 serializes its NumPy-generated bin axis as floats."""
+        workspace = self.make_workspace()
+        path = workspace / "decimal-bins.tsv"
+        lines = GOLDEN_DEEPTOOLS_PROFILE.read_text(encoding="utf-8").splitlines()
+        bins = lines[1].split("\t")
+        bins[2:] = [f"{value}.0" for value in bins[2:]]
+        path.write_text(
+            "\n".join((lines[0], "\t".join(bins), lines[2])) + "\n",
+            encoding="utf-8",
+        )
+
+        profile = qc.read_tss_profile(path)
+
+        self.assertEqual(profile[0], (-3000, 2.0))
+        self.assertEqual(profile[300], (0, 12.0))
+        self.assertEqual(profile[-1], (2990, 2.0))
+
     def test_tss_zero_flank_returns_missing(self):
         """A zero baseline has no defined center-to-flank enrichment ratio."""
         profile = [(index * 10 - 3000, 0.0) for index in range(600)]
