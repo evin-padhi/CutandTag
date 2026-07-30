@@ -122,7 +122,7 @@ if status_sample_ids and sorted(status_sample_ids) != target_ids:
     raise SystemExit("AME status sample_ids do not match target metadata")
 
 def staged_tables(root, prefix, filename, label):
-    """Return exactly one table per unique, contiguous numeric stage ordinal."""
+    # Return exactly one table per unique, contiguous numeric stage ordinal.
     by_ordinal = {}
     pattern = re.compile(rf"{re.escape(prefix)}([0-9]+)")
     for staged in root.iterdir():

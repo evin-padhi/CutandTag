@@ -212,6 +212,8 @@ checks = {
     "QC subworkflow includes and invokes the consolidated dashboard":
         "include { QC_DASHBOARD } from '../../modules/local/qc_dashboard'" in qc
         and "QC_DASHBOARD(" in qc,
+    "dashboard Groovy script contains no nested triple-double-quoted strings":
+        qc_dashboard.count('"""') == 2,
     "QC subworkflow exposes consolidated dashboard report artifacts":
         "qc_dashboard_report = QC_DASHBOARD.out.report" in qc
         and "qc_summary_tsv = QC_DASHBOARD.out.summary_tsv" in qc,
