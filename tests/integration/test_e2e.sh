@@ -278,30 +278,30 @@ from pathlib import Path
 class DashboardHTMLParser(HTMLParser):
     """Reject external dashboard resources after HTMLParser normalizes markup."""
 
+    URL_ATTRIBUTES = {
+        "src", "href", "data", "poster", "srcset", "background", "action",
+        "formaction", "xlink:href",
+    }
+    EXTERNAL_CONTAINER_TAGS = {
+        "iframe", "object", "embed", "audio", "video", "source", "track",
+    }
+    CSS_EXTERNAL_REFERENCE = re.compile(r"url\s*\(|@import\b", re.I)
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.errors = []
         self._style_depth = 0
 
-    @staticmethod
-    def is_remote(value):
-        normalized = value.strip().lower()
-        return normalized.startswith(("http://", "https://", "//"))
-
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
-        if tag == "script" and "src" in attributes:
-            self.errors.append("script src")
-        if tag == "link" and "href" in attributes:
-            self.errors.append("link href")
-        if tag == "img" and "src" in attributes:
-            self.errors.append("img src")
+        if tag in self.EXTERNAL_CONTAINER_TAGS:
+            self.errors.append(f"external container <{tag}>")
         for name, value in attributes.items():
-            if name.endswith(("src", "href")) and value is not None and self.is_remote(value):
-                self.errors.append(f"remote {name}")
+            if name in self.URL_ATTRIBUTES and value is not None and value.strip():
+                self.errors.append(f"URL-bearing {name}")
         style = attributes.get("style")
-        if style is not None and re.search(r"url\s*\(", style, re.I):
-            self.errors.append("CSS url()")
+        if style is not None and self.CSS_EXTERNAL_REFERENCE.search(style):
+            self.errors.append("CSS external reference")
         if tag == "style":
             self._style_depth += 1
 
@@ -314,8 +314,8 @@ class DashboardHTMLParser(HTMLParser):
             self._style_depth -= 1
 
     def handle_data(self, data):
-        if self._style_depth and re.search(r"url\s*\(", data, re.I):
-            self.errors.append("CSS url()")
+        if self._style_depth and self.CSS_EXTERNAL_REFERENCE.search(data):
+            self.errors.append("CSS external reference")
 
 
 def assert_self_contained_dashboard(html_text):
@@ -338,6 +338,14 @@ for label, malicious_html in {
     "image": '<img src="chart.png">',
     "inline CSS": '<div style="background: URL ( chart.png )"></div>',
     "style CSS": '<style>body { background: url(chart.png) }</style>',
+    "iframe": '<iframe src="dashboard-frame.html"></iframe>',
+    "object data": '<object data="chart.svg"></object>',
+    "embed": '<embed src="chart.svg">',
+    "audio": '<audio src="signal.mp3"></audio>',
+    "video": '<video src="signal.mp4"></video>',
+    "source": '<source src="signal.webm">',
+    "track": '<track src="captions.vtt">',
+    "CSS import": '<style>@import "theme.css";</style>',
 }.items():
     try:
         assert_self_contained_dashboard(malicious_html)
