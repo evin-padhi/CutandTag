@@ -4,6 +4,7 @@ include { DEMULTIPLEX } from './subworkflows/local/demultiplex'
 include { ALIGN_QC } from './subworkflows/local/align_qc'
 include { PEAKS } from './subworkflows/local/peaks'
 include { MOTIFS } from './subworkflows/local/motifs'
+include { ENRICHMENT } from './subworkflows/local/enrichment'
 include { QC } from './subworkflows/local/qc'
 
 
@@ -173,6 +174,42 @@ def validatePositiveInteger(rawValue, label) {
 }
 
 
+def validateInteger(rawValue, label) {
+    def text = parameterText(rawValue, label)
+    if (!(text ==~ /-?[0-9]+/)) {
+        throw new IllegalArgumentException(
+            "${label} must be an integer, got ${text}"
+        )
+    }
+    def value = new BigInteger(text)
+    if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+        throw new IllegalArgumentException(
+            "${label} is outside the supported integer range: ${text}"
+        )
+    }
+    value.intValue()
+}
+
+
+def validateUnitInterval(rawValue, label) {
+    def text = parameterText(rawValue, label)
+    def value
+    try {
+        value = new BigDecimal(text)
+    } catch (NumberFormatException error) {
+        throw new IllegalArgumentException(
+            "${label} must be a number in the interval (0, 1], got ${text}"
+        )
+    }
+    if (value <= BigDecimal.ZERO || value > BigDecimal.ONE) {
+        throw new IllegalArgumentException(
+            "${label} must be a number in the interval (0, 1], got ${text}"
+        )
+    }
+    value.doubleValue()
+}
+
+
 def validateMapq(rawValue) {
     def value = validateNonNegativeInteger(rawValue, '--min_mapq')
     if (value > 255) {
@@ -284,9 +321,29 @@ def validatePipelineParameters(rawParams, launchBase) {
         rawParams.motif_db,
         launchBase
     )
+    validated.chipseq_input = validateRegularFile(
+        rawParams.chipseq_input,
+        '--chipseq_input',
+        launchBase,
+        false
+    )
+    if (
+        validated.chipseq_input != null &&
+        !validated.chipseq_input.toLowerCase().endsWith('.csv')
+    ) {
+        throw new IllegalArgumentException(
+            "--chipseq_input must be a CSV manifest: " +
+            validated.chipseq_input
+        )
+    }
     if (validated.motif_db != null && validated.fasta == null) {
         throw new IllegalArgumentException(
             "motif analysis requires --fasta when --motif_db is supplied"
+        )
+    }
+    if (validated.chipseq_input != null && validated.fasta == null) {
+        throw new IllegalArgumentException(
+            "peak enrichment requires --fasta when --chipseq_input is supplied"
         )
     }
     validated.outdir = validateOutputDirectory(rawParams.outdir, launchBase)
@@ -330,6 +387,25 @@ def validatePipelineParameters(rawParams, launchBase) {
         rawParams.motif_window,
         '--motif_window'
     )
+    validated.enrichment_permutations = rawParams.enrichment_permutations == null
+        ? 1000
+        : validatePositiveInteger(
+            rawParams.enrichment_permutations,
+            '--enrichment_permutations'
+        )
+    validated.enrichment_seed = rawParams.enrichment_seed == null
+        ? 1729
+        : validateInteger(
+            rawParams.enrichment_seed,
+            '--enrichment_seed'
+        )
+    validated.enrichment_gc_tolerance =
+        rawParams.enrichment_gc_tolerance == null
+            ? 0.02d
+            : validateUnitInterval(
+                rawParams.enrichment_gc_tolerance,
+                '--enrichment_gc_tolerance'
+            )
     validated
 }
 
@@ -487,6 +563,7 @@ workflow NANOCUT {
     blacklist_ch = optionalPathChannel(validated.blacklist)
     gtf_ch = optionalPathChannel(validated.gtf)
     tss_bed_ch = optionalPathChannel(validated.tss_bed)
+    chipseq_manifest_ch = optionalPathChannel(validated.chipseq_input)
 
     barcode_mismatches_ch = Channel.value(validated.barcode_mismatches)
     allow_empty_ch = Channel.value(validated.allow_empty)
@@ -495,6 +572,10 @@ workflow NANOCUT {
     narrow_peaks_ch = Channel.value(
         validated.motif_db != null && validated.motif_use_narrow_peaks
     )
+    enrichment_results_ch = Channel.empty()
+    enrichment_status_ch = Channel.empty()
+    enrichment_plots_ch = Channel.empty()
+    enrichment_versions_ch = Channel.empty()
 
     DEMULTIPLEX(
         manifest_ch,
@@ -543,6 +624,39 @@ workflow NANOCUT {
         motif_versions_ch = MOTIFS.out.versions
     }
 
+    if (validated.chipseq_input != null) {
+        enrichment_fasta_ch = Channel.fromPath(
+            validated.fasta,
+            checkIfExists: true
+        )
+        enrichment_blacklist_ch = optionalPathChannel(validated.blacklist)
+        enrichment_permutations_ch = Channel.value(
+            validated.enrichment_permutations
+        )
+        enrichment_seed_ch = Channel.value(validated.enrichment_seed)
+        enrichment_gc_tolerance_ch = Channel.value(
+            validated.enrichment_gc_tolerance
+        )
+        analysis_metadata_ch = PEAKS.out.final_broad_peaks.map {
+            meta, peaks -> meta
+        }
+
+        ENRICHMENT(
+            PEAKS.out.final_broad_peaks,
+            analysis_metadata_ch,
+            chipseq_manifest_ch,
+            enrichment_fasta_ch,
+            enrichment_blacklist_ch,
+            enrichment_permutations_ch,
+            enrichment_seed_ch,
+            enrichment_gc_tolerance_ch
+        )
+        enrichment_results_ch = ENRICHMENT.out.results
+        enrichment_status_ch = ENRICHMENT.out.status
+        enrichment_plots_ch = ENRICHMENT.out.plots
+        enrichment_versions_ch = ENRICHMENT.out.versions
+    }
+
     QC(
         ALIGN_QC.out.filtered_bam,
         PEAKS.out.final_broad_peaks,
@@ -567,6 +681,7 @@ workflow NANOCUT {
         ALIGN_QC.out.versions,
         PEAKS.out.versions,
         motif_versions_ch,
+        enrichment_versions_ch,
         QC.out.versions,
         WRITE_PIPELINE_PARAMETERS.out.versions
     )
@@ -598,6 +713,9 @@ workflow NANOCUT {
     coverage = ALIGN_QC.out.coverage
     final_broad_peaks = PEAKS.out.final_broad_peaks
     motif_metrics = motif_metrics_ch
+    enrichment_results = enrichment_results_ch
+    enrichment_status = enrichment_status_ch
+    enrichment_plots = enrichment_plots_ch
     target_qc = QC.out.target_qc
     combined_summary = QC.out.combined_summary
     multiqc_report = QC.out.multiqc_report
