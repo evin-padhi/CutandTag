@@ -86,6 +86,51 @@ def test_blacklisted_candidate_is_not_sampled():
     assert background[0] != Interval("chr1", 30, 40)
 
 
+def test_gc_tolerance_changes_candidate_acceptance():
+    from peak_enrichment import sample_background
+
+    class SequenceRNG:
+        def __init__(self, starts):
+            self.starts = list(starts)
+
+        def choice(self, values):
+            return values[0]
+
+        def randrange(self, start, stop=None, step=1):
+            if stop is None:
+                stop = start
+                start = 0
+            return self.starts.pop(0)
+
+    foreground = [Interval("chr1", 1, 5)]
+    fasta = {"chr1": "AAAACCCC"}
+    chrom_sizes = {"chr1": 8}
+
+    strict_background = sample_background(
+        foreground,
+        chrom_sizes,
+        fasta,
+        [],
+        "length_gc_matched",
+        SequenceRNG([3, 0]),
+        max_attempts=2,
+        gc_tolerance=0.01,
+    )
+    loose_background = sample_background(
+        foreground,
+        chrom_sizes,
+        fasta,
+        [],
+        "length_gc_matched",
+        SequenceRNG([3, 0]),
+        max_attempts=2,
+        gc_tolerance=0.30,
+    )
+
+    assert strict_background is None
+    assert loose_background == [Interval("chr1", 0, 4)]
+
+
 def test_calculate_enrichment_reports_ratio_and_upper_tail_p_value():
     from peak_enrichment import calculate_enrichment
 

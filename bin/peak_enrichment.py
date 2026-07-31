@@ -164,6 +164,7 @@ def sample_background(
     model: str,
     rng: random.Random,
     max_attempts: int,
+    gc_tolerance: float = 0.02,
 ) -> list[Interval] | None:
     foreground = list(foreground)
     blacklist = list(blacklist)
@@ -171,6 +172,8 @@ def sample_background(
         return []
     if max_attempts <= 0:
         return None
+    if gc_tolerance <= 0:
+        raise ValueError("gc_tolerance must be positive")
 
     placed: list[Interval] = []
     gc_models = {"gc_matched", "length_gc_matched"}
@@ -181,7 +184,7 @@ def sample_background(
         attempts_fallback = max_attempts - attempts_1pct if model in gc_models else 0
 
         found: Interval | None = None
-        for tolerance, attempts in ((0.01, attempts_1pct), (None if target_gc is None else 0.02, attempts_fallback)):
+        for tolerance, attempts in ((0.01, attempts_1pct), (None if target_gc is None else gc_tolerance, attempts_fallback)):
             for _ in range(attempts):
                 candidate = _sample_candidate(foreground, chrom_sizes, rng, model, foreground_interval)
                 if candidate is None:
@@ -263,6 +266,7 @@ def calculate_enrichment(
                 model,
                 model_rng,
                 max_attempts=1000,
+                gc_tolerance=gc_tolerance,
             )
             if background is None:
                 continue
