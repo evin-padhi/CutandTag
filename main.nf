@@ -7,8 +7,6 @@ include { MOTIFS } from './subworkflows/local/motifs'
 include { ENRICHMENT } from './subworkflows/local/enrichment'
 include { QC } from './subworkflows/local/qc'
 
-def CHIPSEQ_SAFE_ID = /[A-Za-z0-9][A-Za-z0-9._-]*/
-
 def parameterText(rawValue, label, required = true) {
     def text = rawValue == null ? null : rawValue.toString().trim()
     if (required && (text == null || text.isEmpty())) {
@@ -105,143 +103,6 @@ def validateFasta(rawValue, launchBase) {
 }
 
 
-def loadFastaChromSizes(fastaPathText) {
-    def fastaPath = java.nio.file.Paths.get(fastaPathText)
-    def chromSizes = new LinkedHashMap<String, Integer>()
-    def currentName = null
-    java.nio.file.Files.newBufferedReader(fastaPath).withCloseable { reader ->
-        reader.eachLine { rawLine ->
-            def line = rawLine.trim()
-            if (line.isEmpty()) {
-                return
-            }
-            if (line.startsWith('>')) {
-                def header = line.substring(1).trim()
-                def tokens = header.split(/\s+/)
-                currentName = tokens ? tokens[0] : null
-                if (currentName == null || currentName.isEmpty()) {
-                    throw new IllegalArgumentException(
-                        "FASTA record is missing a sequence name: ${fastaPath}"
-                    )
-                }
-                if (chromSizes.containsKey(currentName)) {
-                    throw new IllegalArgumentException(
-                        "FASTA contains duplicate sequence name ${currentName}: ${fastaPath}"
-                    )
-                }
-                chromSizes[currentName] = 0
-                return
-            }
-            if (currentName == null) {
-                throw new IllegalArgumentException(
-                    "FASTA sequence data appeared before the first header: ${fastaPath}"
-                )
-            }
-            chromSizes[currentName] = chromSizes[currentName] + line.length()
-        }
-    }
-    if (chromSizes.isEmpty()) {
-        throw new IllegalArgumentException(
-            "FASTA contains no records: ${fastaPath}"
-        )
-    }
-    chromSizes
-}
-
-
-def manifestFields(line, delimiter) {
-    line.split(java.util.regex.Pattern.quote(delimiter), -1).collect { value ->
-        def trimmed = value.trim()
-        if (
-            trimmed.length() >= 2 &&
-            trimmed.startsWith('"') &&
-            trimmed.endsWith('"')
-        ) {
-            trimmed.substring(1, trimmed.length() - 1)
-        } else {
-            trimmed
-        }
-    }
-}
-
-
-def readManifestRows(
-    manifestPathText,
-    label,
-    requiredColumns,
-    optionalColumns = [],
-    allowEmpty = false
-) {
-    def manifestPath = java.nio.file.Paths.get(manifestPathText)
-    def lines = java.nio.file.Files.readAllLines(manifestPath)
-    if (lines.isEmpty()) {
-        throw new IllegalArgumentException(
-            "${label} manifest contains no header: ${manifestPath}"
-        )
-    }
-
-    def headerIndex = lines.findIndexOf { line -> !line.trim().isEmpty() }
-    if (headerIndex < 0) {
-        throw new IllegalArgumentException(
-            "${label} manifest contains no header: ${manifestPath}"
-        )
-    }
-    def delimiter = lines[headerIndex].contains('\t') ? '\t' : ','
-    def headers = manifestFields(lines[headerIndex], delimiter)
-    def missingColumns = requiredColumns.findAll { column ->
-        !headers.contains(column)
-    }
-    if (missingColumns) {
-        throw new IllegalArgumentException(
-            "${label} manifest is missing required columns: " +
-            missingColumns.join(', ')
-        )
-    }
-
-    def rows = []
-    for (int index = headerIndex + 1; index < lines.size(); index++) {
-        def rawLine = lines[index]
-        if (rawLine.trim().isEmpty()) {
-            continue
-        }
-        def fields = manifestFields(rawLine, delimiter)
-        if (fields.size() != headers.size()) {
-            throw new IllegalArgumentException(
-                "${label} row ${index + 1} has ${fields.size()} columns, " +
-                "expected ${headers.size()}"
-            )
-        }
-        def rawRow = [:]
-        headers.eachWithIndex { header, columnIndex ->
-            rawRow[header] = fields[columnIndex]
-        }
-        def normalized = [:]
-        requiredColumns.each { column ->
-            def value = rawRow[column]?.toString()?.trim()
-            if (value == null || value.isEmpty()) {
-                throw new IllegalArgumentException(
-                    "${label} row ${index + 1} has blank required value for ${column}"
-                )
-            }
-            normalized[column] = value
-        }
-        optionalColumns.each { column ->
-            if (headers.contains(column)) {
-                normalized[column] = rawRow[column]?.toString()?.trim() ?: ''
-            }
-        }
-        rows << [index + 1, normalized]
-    }
-
-    if (rows.isEmpty() && !allowEmpty) {
-        throw new IllegalArgumentException(
-            "${label} manifest contains no rows: ${manifestPath}"
-        )
-    }
-    rows
-}
-
-
 def resolveManifestPath(value, manifestPathText, rowNumber, column, label) {
     def manifestPath = java.nio.file.Paths.get(manifestPathText)
     java.nio.file.Path candidate = java.nio.file.Paths.get(value)
@@ -261,62 +122,12 @@ def resolveManifestPath(value, manifestPathText, rowNumber, column, label) {
 }
 
 
-def validateBedIntervalsAgainstFasta(
-    peakPath,
-    chromSizes,
-    label
+def validateChipseqManifestAtLaunch(
+    rawValue,
+    fastaPathText,
+    launchBase,
+    projectRoot
 ) {
-    java.nio.file.Files.newBufferedReader(peakPath).withCloseable { reader ->
-        int lineNumber = 0
-        reader.eachLine { rawLine ->
-            lineNumber++
-            def line = rawLine.trim()
-            if (line.isEmpty() || line.startsWith('#')) {
-                return
-            }
-            def fields = rawLine.split('\t')
-            if (fields.size() < 3) {
-                throw new IllegalArgumentException(
-                    "${label} line ${lineNumber} must have at least three BED columns"
-                )
-            }
-            def chrom = fields[0]
-            if (!chromSizes.containsKey(chrom)) {
-                throw new IllegalArgumentException(
-                    "${label} line ${lineNumber} has unknown chromosome ${chrom}"
-                )
-            }
-            def start
-            def end
-            try {
-                start = Integer.parseInt(fields[1])
-                end = Integer.parseInt(fields[2])
-            } catch (NumberFormatException error) {
-                throw new IllegalArgumentException(
-                    "${label} line ${lineNumber} coordinates must be integers"
-                )
-            }
-            if (start < 0 || end < 0) {
-                throw new IllegalArgumentException(
-                    "${label} line ${lineNumber} coordinates must be non-negative"
-                )
-            }
-            if (start >= end) {
-                throw new IllegalArgumentException(
-                    "${label} line ${lineNumber} start must be less than end"
-                )
-            }
-            if (end > chromSizes[chrom]) {
-                throw new IllegalArgumentException(
-                    "${label} line ${lineNumber} end exceeds FASTA chromosome size for ${chrom}"
-                )
-            }
-        }
-    }
-}
-
-
-def validateChipseqManifestAtLaunch(rawValue, fastaPathText, launchBase) {
     def manifestPathText = validateRegularFile(
         rawValue,
         '--chipseq_input',
@@ -337,53 +148,70 @@ def validateChipseqManifestAtLaunch(rawValue, fastaPathText, launchBase) {
         )
     }
 
-    def chromSizes = loadFastaChromSizes(fastaPathText)
-    def rows = readManifestRows(
-        manifestPathText,
-        '--chipseq_input',
-        ['reference_id', 'tf', 'peak_file'],
-        ['reference_type']
-    )
-    def seenIds = new LinkedHashSet<String>()
-    rows.each { rowNumber, row ->
-        def referenceId = row.reference_id.toString()
-        if (!referenceId.matches(CHIPSEQ_SAFE_ID)) {
-            throw new IllegalArgumentException(
-                "--chipseq_input row ${rowNumber} has invalid reference_id " +
-                "${referenceId.inspect()}; use only letters, digits, dot, " +
-                "underscore, or dash, and begin with a letter or digit"
-            )
-        }
-        if (!seenIds.add(referenceId)) {
-            throw new IllegalArgumentException(
-                "--chipseq_input row ${rowNumber} has duplicate reference_id " +
-                referenceId.inspect()
-            )
-        }
-        def referenceType = row.reference_type?.toString()?.trim()
-        if (referenceType == null || referenceType.isEmpty()) {
-            referenceType = 'chipseq'
-        }
-        if (!(referenceType in ['chipseq', 'called_tf'])) {
-            throw new IllegalArgumentException(
-                "--chipseq_input row ${rowNumber} has unsupported " +
-                "reference_type ${referenceType.inspect()}"
-            )
-        }
-        def peakPath = resolveManifestPath(
-            row.peak_file.toString(),
-            manifestPathText,
-            rowNumber,
-            'peak_file',
-            '--chipseq_input'
+    def validationScript = java.nio.file.Paths.get(projectRoot.toString())
+        .resolve('bin/peak_enrichment.py')
+        .normalize()
+        .toAbsolutePath()
+    if (!java.nio.file.Files.isRegularFile(validationScript)) {
+        throw new IllegalArgumentException(
+            "missing ChIP-seq validation utility: ${validationScript}"
         )
-        validateBedIntervalsAgainstFasta(
-            peakPath,
-            chromSizes,
-            "--chipseq_input row ${rowNumber} peak_file"
+    }
+    def command = [
+        'python3',
+        validationScript.toString(),
+        'validate-chipseq-manifest',
+        '--manifest',
+        manifestPathText,
+        '--fasta',
+        fastaPathText,
+    ]
+    def validator
+    try {
+        validator = new ProcessBuilder(command)
+            .redirectErrorStream(true)
+            .start()
+    } catch (java.io.IOException error) {
+        throw new IllegalArgumentException(
+            "python3 is required for ChIP-seq manifest launch validation",
+            error
+        )
+    }
+    def validationOutput = validator.inputStream.getText('UTF-8').trim()
+    def validationStatus = validator.waitFor()
+    if (validationStatus != 0) {
+        throw new IllegalArgumentException(
+            validationOutput ?: "ChIP-seq manifest validation failed"
         )
     }
     manifestPathText
+}
+
+
+def chipseqReferenceEntry(row, manifestPathText) {
+    def referenceId = row.reference_id?.toString()?.trim()
+    def tf = row.tf?.toString()?.trim()
+    def peakFile = row.peak_file?.toString()?.trim()
+    if (referenceId == null || tf == null || peakFile == null) {
+        throw new IllegalArgumentException(
+            "--chipseq_input rows require reference_id, tf, and peak_file"
+        )
+    }
+    def peakPath = resolveManifestPath(
+        peakFile,
+        manifestPathText,
+        'parsed',
+        'peak_file',
+        '--chipseq_input'
+    )
+    tuple(
+        [
+            reference_id: referenceId,
+            tf: tf,
+            reference_type: 'chipseq',
+        ],
+        peakPath
+    )
 }
 
 
@@ -559,7 +387,7 @@ def validateOutputDirectory(rawValue, launchBase) {
 }
 
 
-def validatePipelineParameters(rawParams, launchBase) {
+def validatePipelineParameters(rawParams, launchBase, projectRoot) {
     def validated = new LinkedHashMap()
     validated.input = validateRegularFile(
         rawParams.input,
@@ -612,7 +440,8 @@ def validatePipelineParameters(rawParams, launchBase) {
     validated.chipseq_input = validateChipseqManifestAtLaunch(
         rawParams.chipseq_input,
         validated.fasta,
-        launchBase
+        launchBase,
+        projectRoot
     )
     validated.outdir = validateOutputDirectory(rawParams.outdir, launchBase)
     validated.barcode_mismatches = validateNonNegativeInteger(
@@ -817,6 +646,11 @@ peak_enrichment_tables = [
 ]
 if len(peak_enrichment_tables) > 1:
     raise SystemExit("expected at most one peak_enrichment.tsv in completion summary inputs")
+enrichment_by_name = {}
+for path in enrichment_tables:
+    if path.name in enrichment_by_name:
+        raise SystemExit(f"duplicate enrichment summary input: {path.name}")
+    enrichment_by_name[path.name] = path
 with open("run_summary.txt", "w", encoding="utf-8") as output:
     output.write("status\\tsucceeded\\n")
     output.write(f"target_count\\t{len(targets)}\\n")
@@ -824,7 +658,33 @@ with open("run_summary.txt", "w", encoding="utf-8") as output:
     output.write("report\\treports/multiqc/multiqc_report.html\\n")
     output.write("target_summary\\treports/summary/combined_target_qc.tsv\\n")
     if peak_enrichment_tables:
-        output.write("peak_enrichment\\treports/summary/peak_enrichment.tsv\\n")
+        required_plots = [
+            "observed_vs_null.png",
+            "matrix_random.png",
+            "matrix_length_matched.png",
+            "matrix_gc_matched.png",
+            "matrix_length_gc_matched.png",
+        ]
+        missing_plots = [
+            name for name in required_plots if name not in enrichment_by_name
+        ]
+        if missing_plots:
+            raise SystemExit(
+                "missing enrichment plots for completion summary: "
+                + ", ".join(missing_plots)
+            )
+        output.write("peak_enrichment\\tenrichment/peak_enrichment.tsv\\n")
+        output.write("enrichment_plot\\tenrichment/plots/observed_vs_null.png\\n")
+        for model in (
+            "random",
+            "length_matched",
+            "gc_matched",
+            "length_gc_matched",
+        ):
+            output.write(
+                f"enrichment_heatmap_{model}\\t"
+                f"enrichment/plots/matrix_{model}.png\\n"
+            )
     output.write("versions\\tpipeline_info/software_versions.yml\\n")
 PY
     '''
@@ -833,14 +693,13 @@ PY
 
 workflow NANOCUT {
     main:
-    validated = validatePipelineParameters(params, launchDir)
+    validated = validatePipelineParameters(params, launchDir, projectDir)
     params.outdir = validated.outdir
 
     manifest_ch = Channel.fromPath(validated.input, checkIfExists: true)
     blacklist_ch = optionalPathChannel(validated.blacklist)
     gtf_ch = optionalPathChannel(validated.gtf)
     tss_bed_ch = optionalPathChannel(validated.tss_bed)
-    chipseq_manifest_ch = optionalPathChannel(validated.chipseq_input)
 
     barcode_mismatches_ch = Channel.value(validated.barcode_mismatches)
     allow_empty_ch = Channel.value(validated.allow_empty)
@@ -854,6 +713,7 @@ workflow NANOCUT {
     enrichment_plots_ch = Channel.empty()
     enrichment_dashboard_files_ch = Channel.empty()
     enrichment_versions_ch = Channel.empty()
+    chipseq_reference_inputs_ch = Channel.empty()
 
     DEMULTIPLEX(
         manifest_ch,
@@ -903,6 +763,35 @@ workflow NANOCUT {
     }
 
     if (validated.chipseq_input != null) {
+        chipseq_reference_inputs_ch = Channel
+            .fromPath(validated.chipseq_input, checkIfExists: true)
+            .splitCsv(header: true)
+            .map { row ->
+                chipseqReferenceEntry(row, validated.chipseq_input)
+            }
+            .collect(flat: false)
+            .map { entries ->
+                if (entries.isEmpty()) {
+                    throw new IllegalArgumentException(
+                        "--chipseq_input manifest contains no rows"
+                    )
+                }
+                def orderedEntries = entries.sort { left, right ->
+                    left[0].reference_id <=> right[0].reference_id
+                }
+                def referenceRows = orderedEntries.collect { entry ->
+                    entry[0]
+                }
+                def encodedRows = groovy.json.JsonOutput
+                    .toJson(referenceRows)
+                    .bytes
+                    .encodeBase64()
+                    .toString()
+                tuple(
+                    encodedRows,
+                    orderedEntries.collect { entry -> entry[1] }
+                )
+            }
         enrichment_fasta_ch = Channel.fromPath(
             validated.fasta,
             checkIfExists: true
@@ -922,7 +811,7 @@ workflow NANOCUT {
         ENRICHMENT(
             PEAKS.out.final_broad_peaks,
             analysis_metadata_ch,
-            chipseq_manifest_ch,
+            chipseq_reference_inputs_ch,
             enrichment_fasta_ch,
             enrichment_blacklist_ch,
             enrichment_permutations_ch,
@@ -972,7 +861,8 @@ workflow NANOCUT {
     }.collect()
     COLLECT_VERSIONS(version_files_ch)
     completion_summary_enrichment = QC.out.enrichment_table
-        .collect(flat: false)
+        .mix(QC.out.enrichment_plot, QC.out.enrichment_heatmaps)
+        .collect()
         .ifEmpty { ignored -> [] }
 
     WRITE_COMPLETION_SUMMARY(

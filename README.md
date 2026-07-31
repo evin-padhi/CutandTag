@@ -3,8 +3,9 @@
 This Nextflow DSL2 workflow demultiplexes paired-end bulk nano-CUT&Tag reads
 with an 8-base I2 barcode, aligns each derived sample, calls matched-IgG
 NanoScope-compatible broad peaks, calculates library/peak QC, and optionally
-tests expected and de novo motifs. The repository includes the exact
-six-library manifest mapping in `assets/samples.example.csv`.
+tests expected and de novo motifs or peak-overlap enrichment against public
+ChIP-seq references. The repository includes the exact six-library manifest
+mapping in `assets/samples.example.csv`.
 
 ## Prerequisites
 
@@ -17,6 +18,9 @@ six-library manifest mapping in `assets/samples.example.csv`.
 - The input manifest and readable R1, R2, and I2 FASTQs.
 - A MACS2 genome-size shortcut such as `hs`, or a positive effective genome
   size integer.
+- Python 3 on the launch host when `--chipseq_input` is used; it runs the
+  repository CSV/BED validator before workflow scheduling. Enrichment tasks
+  themselves still use the selected Conda or Docker profile.
 
 The `conda` profile is the most direct portable installation path. Nextflow
 automatically creates each process environment from the repository-local,
@@ -36,7 +40,7 @@ The canonical environments are:
 
 | File | Direct pinned tool | Used for |
 |---|---|---|
-| `envs/python.yml` | Python 3.12.3 | Manifest validation, demultiplexing, custom QC, pipeline metadata |
+| `envs/python.yml` | Python 3.12.3, matplotlib 3.9.2 | Manifest validation, demultiplexing, enrichment statistics/plots, custom QC, pipeline metadata |
 | `envs/fastqc.yml` | FastQC 0.12.1 | Read QC |
 | `envs/bowtie2.yml` | Bowtie2 2.5.4 | Index construction and alignment |
 | `envs/samtools.yml` | SAMtools 1.20 | BAM sorting/filtering/indexing, metrics, fragments |
@@ -155,12 +159,12 @@ Use one of:
   `1`, `2`, `3`, `4`, `rev.1`, and `rev.2`. Supply the prefix only, without a
   suffix. A supplied index takes precedence for alignment.
 
-`--fasta` is still required when `--motif_db` is supplied because motif
-windows must be extracted from the genome. Optional `--blacklist` is a BED
-file removed from final broad peaks and motif inputs. Optional `--tss_bed`
-must be strand-aware BED6 and takes precedence over `--gtf`; otherwise
-transcript features in the GTF are converted to strand-aware single-base TSS
-records.
+`--fasta` is still required when `--motif_db` or `--chipseq_input` is supplied
+because motif windows and enrichment backgrounds use the reference sequence.
+Optional `--blacklist` is a BED file removed from final broad peaks, motif
+inputs, and enrichment backgrounds. Optional `--tss_bed` must be strand-aware
+BED6 and takes precedence over `--gtf`; otherwise transcript features in the
+GTF are converted to strand-aware single-base TSS records.
 
 ## Run the pipeline
 
@@ -228,6 +232,7 @@ parameters use two.
 | `--gtf` | Absent | Optional GTF for transcript-derived, strand-aware TSS positions. |
 | `--tss_bed` | Absent | Optional BED6 TSS file; takes precedence over `--gtf`. |
 | `--motif_db` | Absent | MEME-format database beginning with `MEME version` and containing at least one `MOTIF` record; enables motif analysis. |
+| `--chipseq_input` | Absent | Public ChIP-seq CSV with `reference_id,tf,peak_file`; enables peak-overlap enrichment and requires `--fasta`. |
 | `--barcode_mismatches` | `0` | Non-negative I2 Hamming-distance threshold, smaller than barcode length. |
 | `--allow_empty` | `false` | Permit a derived sample with zero assigned read pairs for diagnostic runs. |
 | `--min_mapq` | `5` | Integer 0–255 used for the filtered BAM, coverage, and fragment QC. |
@@ -238,6 +243,9 @@ parameters use two.
 | `--macs_max_gap` | Fixed `1000` | Primary broad-peak maximum gap; other values are rejected. |
 | `--motif_use_narrow_peaks` | `true` | Use matched-control narrow summits for motif windows. If false, use final broad-peak midpoints. |
 | `--motif_window` | `200` | Positive total motif-window width in bp. Windows shift at reference edges; a shorter contig yields its full length. |
+| `--enrichment_permutations` | `1000` | Positive number of attempted null permutations for every foreground/reference/model comparison. |
+| `--enrichment_seed` | `1729` | Integer base seed recorded in enrichment outputs; comparison/model-specific streams remain deterministic. |
+| `--enrichment_gc_tolerance` | `0.02` | GC fallback tolerance in `(0, 1]`; the sampler first tries a 1-percentage-point match, then this tolerance. |
 
 Boolean CLI values must reach Nextflow as booleans (`true` or `false`).
 Optional features are skipped only when their path parameter is absent; a
@@ -261,6 +269,10 @@ results/
   qc/peaks/<sample_id>/
   qc/tss/<sample_id>/
   motifs/<sample_id>/
+  enrichment/
+    peak_enrichment.tsv
+    enrichment_status.tsv
+    plots/
   reports/multiqc/
   reports/summary/
   pipeline_info/
@@ -285,6 +297,8 @@ results/
 - `motifs/` contains foreground/background intervals and FASTAs, AME known
   enrichment, STREME de novo discovery, FIMO scans, status/log files, and
   `expected_motif_qc` JSON/TSV/position outputs.
+- `enrichment/` contains the complete long-form `peak_enrichment.tsv`, status
+  table, four TSV matrices and heatmap PNGs, and `observed_vs_null.png`.
 - `reports/multiqc/multiqc_report.html` is the top-level report.
   `reports/summary/combined_target_qc.tsv` is the combined target broad-peak
   summary.
@@ -295,6 +309,71 @@ results/
 Empty target peak sets are valid outputs with zero/NA QC and recorded motif
 skip status. IgG libraries receive read/alignment/library QC but are not
 peak-called against themselves and do not receive target FRiP by default.
+
+## Optional peak-overlap enrichment
+
+Supply `--chipseq_input` to compare every final non-control CUT&Tag target
+against public ChIP-seq peaks. The CSV contract is:
+
+```csv
+reference_id,tf,peak_file
+ctcf_encode,CTCF,references/ctcf.bed
+```
+
+`reference_id` must be unique and path-safe, `tf` is a display label, and
+`peak_file` is a readable BED-like file with zero-based, half-open intervals.
+Relative peak paths resolve from the CSV directory. Quoted CSV values are
+supported. Extra public columns are ignored: public rows are always normalized
+as `reference_type=chipseq`; `reference_type` is reserved for the pipeline's
+internal manifest, where same-run target sets are tagged `called_tf`. Invalid
+identifiers, duplicate IDs, malformed intervals, unknown chromosomes, and
+missing files fail before enrichment is scheduled.
+
+When at least two called TFs are present, each is also used as a reference for
+the others; self-comparisons are excluded. Each foreground/reference pair gets
+four independent null models:
+
+- `random`: samples chromosome and width from the foreground distributions.
+- `length_matched`: preserves each foreground interval's chromosome and exact
+  width.
+- `gc_matched`: preserves each interval's chromosome, samples widths from the
+  foreground distribution, and matches GC content.
+- `length_gc_matched`: preserves chromosome and exact width and matches GC.
+
+Both GC-aware models try a 1-percentage-point match before falling back to
+`--enrichment_gc_tolerance` (2 percentage points by default). Every model
+excludes blacklist intervals and within-replicate overlaps.
+
+The long-form result schema is:
+
+```text
+foreground_id,foreground_tf,reference_id,reference_type,reference_tf,
+background_model,foreground_peak_count,reference_peak_count,
+observed_overlap_count,null_mean_overlap,null_sd_overlap,enrichment_ratio,
+empirical_p_value,permutations_requested,permutations_succeeded,seed,status
+```
+
+`status=ok` requires every requested permutation to succeed and a nonzero null
+mean. `insufficient_background` means one or more permutations failed and has
+blank inferential statistics; `zero_null_mean` explicitly marks a completed
+null distribution whose ratio and p-value are not reported.
+`no_foreground_peaks` and `no_reference_peaks` describe empty inputs. Do not
+interpret any non-`ok` row as evidence of enrichment.
+
+Canonical artifacts are published under `enrichment/`. MultiQC adds a table
+only for `ok` rows, keys each row by the foreground/reference/model
+comparison, and embeds all four configured heatmap images plus the
+observed-versus-null plot. The completion summary links the canonical
+`peak_enrichment.tsv`, `observed_vs_null.png`, and each heatmap when enrichment
+is present; no enrichment section or links are created when the option is
+absent.
+
+These are overlap statistics, not proof of direct binding or regulatory
+causality. Reference cell type, assay quality, genome build, peak-calling
+choices, blacklist coverage, and peak-set size can dominate the result.
+Empirical p-value resolution is limited by the permutation count, and the
+pipeline does not apply a multiple-comparison correction. Compare models and
+biological contexts deliberately rather than ranking ratios alone.
 
 ## QC interpretation
 

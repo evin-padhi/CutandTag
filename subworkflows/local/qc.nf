@@ -322,6 +322,8 @@ workflow QC {
     target_qc = PEAK_QC.out.qc
     combined_summary = MULTIQC.out.combined_summary
     enrichment_table = MULTIQC.out.enrichment_table
+    enrichment_plot = MULTIQC.out.enrichment_plot
+    enrichment_heatmaps = MULTIQC.out.enrichment_heatmaps
     tss_profiles = TSS_ENRICHMENT.out.profiles
     multiqc_report = MULTIQC.out.report
     multiqc_data = MULTIQC.out.data

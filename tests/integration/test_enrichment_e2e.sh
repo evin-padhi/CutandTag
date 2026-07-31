@@ -138,7 +138,30 @@ if missing:
     raise SystemExit("FAIL: missing or empty CLI outputs:\n  - " + "\n  - ".join(missing))
 
 with (outdir / "peak_enrichment.tsv").open(newline="", encoding="utf-8") as handle:
-    rows = list(csv.DictReader(handle, delimiter="\t"))
+    reader = csv.DictReader(handle, delimiter="\t")
+    rows = list(reader)
+
+expected_columns = [
+    "foreground_id",
+    "foreground_tf",
+    "reference_id",
+    "reference_type",
+    "reference_tf",
+    "background_model",
+    "foreground_peak_count",
+    "reference_peak_count",
+    "observed_overlap_count",
+    "null_mean_overlap",
+    "null_sd_overlap",
+    "enrichment_ratio",
+    "empirical_p_value",
+    "permutations_requested",
+    "permutations_succeeded",
+    "seed",
+    "status",
+]
+if reader.fieldnames != expected_columns:
+    raise SystemExit(f"FAIL: unexpected enrichment schema: {reader.fieldnames!r}")
 
 if not rows:
     raise SystemExit("FAIL: peak_enrichment.tsv is empty")
@@ -150,9 +173,11 @@ if {row["background_model"] for row in rows} != models:
     )
 
 numeric_fields = (
+    "foreground_peak_count",
+    "reference_peak_count",
     "observed_overlap_count",
-    "null_mean_overlap_count",
-    "null_stddev_overlap_count",
+    "null_mean_overlap",
+    "null_sd_overlap",
     "enrichment_ratio",
     "empirical_p_value",
 )
@@ -278,19 +303,19 @@ from pathlib import Path
 
 results = Path(sys.argv[1])
 required_outputs = [
-    results / "peak_enrichment/peak_enrichment.tsv",
-    results / "peak_enrichment/enrichment_status.tsv",
-    results / "peak_enrichment/plots/observed_vs_null.png",
+    results / "enrichment/peak_enrichment.tsv",
+    results / "enrichment/enrichment_status.tsv",
+    results / "enrichment/plots/observed_vs_null.png",
     results / "reports/summary/peak_enrichment.tsv",
     results / "reports/multiqc/multiqc_report.html",
     results / "reports/multiqc/observed_vs_null.png",
 ]
 required_outputs.extend(
-    results / "peak_enrichment/plots" / f"matrix_{model}.tsv"
+    results / "enrichment/plots" / f"matrix_{model}.tsv"
     for model in ("random", "length_matched", "gc_matched", "length_gc_matched")
 )
 required_outputs.extend(
-    results / "peak_enrichment/plots" / f"matrix_{model}.png"
+    results / "enrichment/plots" / f"matrix_{model}.png"
     for model in ("random", "length_matched", "gc_matched", "length_gc_matched")
 )
 required_outputs.extend(
@@ -323,8 +348,15 @@ run_summary = {
         fieldnames=["metric", "value"],
     )
 }
-if run_summary.get("peak_enrichment") != "reports/summary/peak_enrichment.tsv":
+if run_summary.get("peak_enrichment") != "enrichment/peak_enrichment.tsv":
     raise SystemExit(
         "FAIL: run summary did not advertise the enrichment summary output"
     )
+if run_summary.get("enrichment_plot") != "enrichment/plots/observed_vs_null.png":
+    raise SystemExit("FAIL: run summary did not advertise the observed/null plot")
+for model in ("random", "length_matched", "gc_matched", "length_gc_matched"):
+    key = f"enrichment_heatmap_{model}"
+    expected = f"enrichment/plots/matrix_{model}.png"
+    if run_summary.get(key) != expected:
+        raise SystemExit(f"FAIL: run summary did not advertise {model} heatmap")
 PY

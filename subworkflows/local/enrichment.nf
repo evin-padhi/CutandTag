@@ -53,10 +53,16 @@ def enrichmentDescriptor(rawTf) {
         )
     }
     def token = tf.replaceAll(/[^A-Za-z0-9._-]+/, '_')
-    if (!token || !(token[0] ==~ /[A-Za-z0-9]/)) {
-        token = "tf_${token}"
+    if (!token) {
+        token = "tf"
     }
-    def foregroundId = "called_tf_${token}"
+    token = token.take(48)
+    def foregroundHash = java.security.MessageDigest.getInstance('SHA-256')
+        .digest(tf.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        .encodeHex()
+        .toString()
+        .take(12)
+    def foregroundId = "called_tf_${token}_${foregroundHash}"
     if (!foregroundId.matches(ENRICHMENT_SAFE_ID)) {
         throw new IllegalArgumentException(
             "foreground_id must match ${ENRICHMENT_SAFE_ID}, got ${foregroundId}"
@@ -200,9 +206,9 @@ process RUN_PEAK_ENRICHMENT {
     label 'process_heavy'
 
     conda "${projectDir}/envs/python.yml"
-    container 'python:3.12.3-slim-bookworm'
+    container 'quay.io/jupyter/scipy-notebook:82d322f00937'
 
-    publishDir "${params.outdir}/peak_enrichment",
+    publishDir "${params.outdir}/enrichment",
         mode: 'copy',
         overwrite: true
 
@@ -210,8 +216,10 @@ process RUN_PEAK_ENRICHMENT {
     val foreground_rows_b64
     path foreground_peak_files, stageAs: 'foregrounds/*', arity: '1..*'
     path external_manifest, stageAs: 'chipseq/validated.tsv'
+    path external_peak_files, stageAs: 'chipseq/reference_peaks/*', arity: '1..*'
     path fasta, stageAs: 'reference.fa'
     path blacklist_files, stageAs: 'blacklist/regions*.bed'
+    path enrichment_script, stageAs: 'bin/peak_enrichment.py'
     val permutations
     val seed
     val gc_tolerance
@@ -237,8 +245,6 @@ process RUN_PEAK_ENRICHMENT {
     def blacklistArg = blacklist_files
         ? '--blacklist "blacklist/regions.bed"'
         : ''
-    def projectBin = "${projectDir}/bin".toString()
-
     """
     set -euo pipefail
     printf '%s' "${foreground_rows_b64}" | python -c \
@@ -265,7 +271,7 @@ with open("foreground_manifest.tsv", "w", encoding="utf-8", newline="") as handl
 with open("chipseq/validated.tsv", encoding="utf-8", newline="") as handle:
     external_rows = list(csv.DictReader(handle, delimiter="\\t"))
 
-with open("reference_manifest.tsv", "w", encoding="utf-8", newline="") as handle:
+with open("chipseq/reference_manifest.tsv", "w", encoding="utf-8", newline="") as handle:
     writer = csv.DictWriter(
         handle,
         fieldnames=["reference_id", "tf", "reference_type", "peak_file"],
@@ -280,14 +286,16 @@ with open("reference_manifest.tsv", "w", encoding="utf-8", newline="") as handle
                 "reference_id": row["foreground_id"],
                 "tf": row["foreground_tf"],
                 "reference_type": "called_tf",
-                "peak_file": row["peak_file"],
+                "peak_file": f"../{row['peak_file']}",
             }
         )
 PY
 
-    python "${projectBin}/peak_enrichment.py" \
+    mkdir -p ".matplotlib"
+    export MPLCONFIGDIR="\$PWD/.matplotlib"
+    python "bin/peak_enrichment.py" \
         --foreground-manifest "foreground_manifest.tsv" \
-        --reference-manifest "reference_manifest.tsv" \
+        --reference-manifest "chipseq/reference_manifest.tsv" \
         --fasta "reference.fa" \
         --outdir "." \
         --permutations "${safePermutations}" \
@@ -312,17 +320,19 @@ process WRITE_EMPTY_ENRICHMENT_OUTPUTS {
     label 'process_light'
 
     conda "${projectDir}/envs/python.yml"
-    container 'python:3.12.3-slim-bookworm'
+    container 'quay.io/jupyter/scipy-notebook:82d322f00937'
 
-    publishDir "${params.outdir}/peak_enrichment",
+    publishDir "${params.outdir}/enrichment",
         mode: 'copy',
         overwrite: true
 
     input:
     val foreground_rows
     path external_manifest, stageAs: 'chipseq/validated.tsv'
+    path external_peak_files, stageAs: 'chipseq/reference_peaks/*', arity: '1..*'
     path fasta, stageAs: 'reference.fa'
     path blacklist_files, stageAs: 'blacklist/regions*.bed'
+    path enrichment_script, stageAs: 'bin/peak_enrichment.py'
     val permutations
     val seed
     val gc_tolerance
@@ -353,14 +363,14 @@ process WRITE_EMPTY_ENRICHMENT_OUTPUTS {
     def blacklistArg = blacklist_files
         ? '--blacklist "blacklist/regions.bed"'
         : ''
-    def projectBin = "${projectDir}/bin".toString()
-
     """
     set -euo pipefail
     printf 'foreground_id\tforeground_tf\tpeak_file\n' \
         > "foreground_manifest.tsv"
 
-    python "${projectBin}/peak_enrichment.py" \
+    mkdir -p ".matplotlib"
+    export MPLCONFIGDIR="\$PWD/.matplotlib"
+    python "bin/peak_enrichment.py" \
         --foreground-manifest "foreground_manifest.tsv" \
         --reference-manifest "chipseq/validated.tsv" \
         --fasta "reference.fa" \
@@ -386,7 +396,7 @@ workflow ENRICHMENT {
     take:
     final_broad_peaks
     analysis_metadata
-    chipseq_manifest
+    chipseq_references
     fasta
     blacklist
     permutations
@@ -399,9 +409,6 @@ workflow ENRICHMENT {
         .collect(flat: false)
         .map { rows -> analysisBySampleId(rows) }
 
-    reusable_chipseq_manifest = chipseq_manifest
-        .collect(flat: false)
-        .map { rows -> singletonEnrichmentPath(rows, 'ChIP-seq manifest') }
     reusable_fasta = fasta
         .collect(flat: false)
         .map { rows -> singletonEnrichmentPath(rows, 'reference FASTA') }
@@ -420,7 +427,14 @@ workflow ENRICHMENT {
         validateWorkflowGcTolerance(value)
     }
 
-    VALIDATE_CHIPSEQ_MANIFEST(reusable_chipseq_manifest, reusable_fasta)
+    enrichment_script = Channel.value(
+        file("${projectDir}/bin/peak_enrichment.py", checkIfExists: true)
+    )
+    VALIDATE_CHIPSEQ_MANIFEST(
+        chipseq_references,
+        reusable_fasta,
+        enrichment_script
+    )
 
     grouped_foregrounds = final_broad_peaks
         .map { meta, peaks ->
@@ -446,12 +460,7 @@ workflow ENRICHMENT {
 
     MERGE_FOREGROUND_PEAKS(grouped_foregrounds)
 
-    MERGE_FOREGROUND_PEAKS.out.foregrounds.into {
-        merged_foregrounds_for_rows
-        merged_foregrounds_for_paths
-    }
-
-    foreground_rows_b64 = merged_foregrounds_for_rows
+    foreground_rows_b64 = MERGE_FOREGROUND_PEAKS.out.foregrounds
         .map { foreground_meta, peak_file ->
             [
                 foreground_id: foreground_meta.foreground_id,
@@ -466,7 +475,7 @@ workflow ENRICHMENT {
                 .encodeBase64()
                 .toString()
         }
-    empty_foreground_rows = merged_foregrounds_for_rows
+    empty_foreground_rows = MERGE_FOREGROUND_PEAKS.out.foregrounds
         .map { foreground_meta, peak_file ->
             [
                 foreground_id: foreground_meta.foreground_id,
@@ -476,7 +485,7 @@ workflow ENRICHMENT {
         }
         .collect(flat: false)
         .filter { rows -> rows.isEmpty() }
-    foreground_peak_files = merged_foregrounds_for_paths
+    foreground_peak_files = MERGE_FOREGROUND_PEAKS.out.foregrounds
         .map { foreground_meta, peak_file -> peak_file }
         .collect(flat: false)
 
@@ -484,8 +493,10 @@ workflow ENRICHMENT {
         foreground_rows_b64,
         foreground_peak_files,
         VALIDATE_CHIPSEQ_MANIFEST.out.normalized,
+        VALIDATE_CHIPSEQ_MANIFEST.out.peaks,
         reusable_fasta,
         reusable_blacklist,
+        enrichment_script,
         safe_permutations,
         safe_seed,
         safe_gc_tolerance
@@ -493,8 +504,10 @@ workflow ENRICHMENT {
     WRITE_EMPTY_ENRICHMENT_OUTPUTS(
         empty_foreground_rows,
         VALIDATE_CHIPSEQ_MANIFEST.out.normalized,
+        VALIDATE_CHIPSEQ_MANIFEST.out.peaks,
         reusable_fasta,
         reusable_blacklist,
+        enrichment_script,
         safe_permutations,
         safe_seed,
         safe_gc_tolerance

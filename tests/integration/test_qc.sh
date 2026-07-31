@@ -187,6 +187,13 @@ checks = {
         'row.get("status") == "ok"' in multiqc
         and "nanocut_peak_enrichment_mqc.tsv" in multiqc
         and "if enrichment_rows:" in multiqc,
+    "MultiQC keys enrichment rows by the full comparison and configures image sections":
+        '"comparison_id"' in multiqc
+        and 'f"{row[\'foreground_id\']}|{row[\'reference_id\']}|{row[\'background_model\']}"' in multiqc
+        and "duplicate enrichment comparison_id" in multiqc
+        and '"plot_type": "image"' in multiqc
+        and "ignore_images: false" in multiqc
+        and "_heatmap_mqc.png" in multiqc,
     "MultiQC retains HTML, data, custom content, and versions":
         "multiqc_report.html" in multiqc
         and "multiqc_data" in multiqc
@@ -592,9 +599,10 @@ grep -F $'<run>\tnone\tskipped_no_annotation' \
 
 mkdir -p "$tmp_dir/aggregate/enrichment01"
 cat > "$tmp_dir/aggregate/enrichment01/peak_enrichment.tsv" <<'EOF'
-foreground_id	foreground_tf	reference_id	reference_tf	background_model	seed	status	permutations_requested	permutations_succeeded	observed_overlap_count	null_mean_overlap_count	null_stddev_overlap_count	enrichment_ratio	empirical_p_value
-fg_ctcf	CTCF	ref_prior	CTCF	random	1729	ok	1000	1000	10	4.0	1.5	2.5	0.001
-fg_ctcf	CTCF	ref_prior	CTCF	length_matched	1729	insufficient_background	1000	200	10	3.0	1.0	3.3	0.050
+foreground_id	foreground_tf	reference_id	reference_type	reference_tf	background_model	foreground_peak_count	reference_peak_count	observed_overlap_count	null_mean_overlap	null_sd_overlap	enrichment_ratio	empirical_p_value	permutations_requested	permutations_succeeded	seed	status
+fg_ctcf	CTCF	ref_prior	chipseq	CTCF	random	20	25	10	4.0	1.5	2.5	0.001	1000	1000	1729	ok
+fg_ctcf	CTCF	ref_prior	chipseq	CTCF	length_matched	20	25	10	5.0	1.0	2.0	0.010	1000	1000	1729	ok
+fg_ctcf	CTCF	ref_prior	chipseq	CTCF	gc_matched	20	25	10					1000	200	1729	insufficient_background
 EOF
 cat > "$tmp_dir/aggregate/enrichment01/matrix_random.tsv" <<'EOF'
 foreground_id	ref_prior
@@ -626,13 +634,35 @@ done
   annotation_status=skipped_no_annotation \
     python3 "$repo_root/.multiqc_aggregate.test.py"
 )
-grep -F $'fg_ctcf\tCTCF\tref_prior\tCTCF\trandom\t1729\tok' \
-  "$tmp_dir/aggregate/multiqc_custom_content/nanocut_peak_enrichment_mqc.tsv" >/dev/null
-if grep -F 'insufficient_background' \
-  "$tmp_dir/aggregate/multiqc_custom_content/nanocut_peak_enrichment_mqc.tsv" >/dev/null; then
-  printf 'FAIL: non-ok enrichment rows unexpectedly reached MultiQC custom content\n' >&2
-  exit 1
-fi
+python3 - "$tmp_dir/aggregate" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+custom = root / "multiqc_custom_content"
+with (custom / "nanocut_peak_enrichment_mqc.tsv").open(
+    newline="",
+    encoding="utf-8",
+) as handle:
+    rows = list(csv.DictReader(handle, delimiter="\t"))
+
+comparison_ids = [row["comparison_id"] for row in rows]
+assert comparison_ids == [
+    "fg_ctcf|ref_prior|random",
+    "fg_ctcf|ref_prior|length_matched",
+]
+assert len(comparison_ids) == len(set(comparison_ids))
+assert all(row["status"] == "ok" for row in rows)
+
+config = (root / "multiqc_config.yml").read_text(encoding="utf-8")
+assert "ignore_images: false" in config
+for model in ("random", "length_matched", "gc_matched", "length_gc_matched"):
+    image_name = f"nanocut_peak_enrichment_{model}_heatmap_mqc.png"
+    assert (custom / image_name).is_file()
+    assert image_name in config
+    assert 'plot_type: "image"' in config
+PY
 grep -F 'Nano-CUT&Tag peak enrichment' \
   "$tmp_dir/aggregate/multiqc_custom_content/nanocut_peak_enrichment_overview_mqc.md" >/dev/null
 rm -rf "$tmp_dir/aggregate/enrichment01"

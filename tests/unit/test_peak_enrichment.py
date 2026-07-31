@@ -193,6 +193,38 @@ def test_gc_tolerance_changes_candidate_acceptance():
     assert loose_background == [Interval("chr1", 0, 4)]
 
 
+def test_gc_matched_preserves_each_foreground_chromosome_while_sampling_widths():
+    import random
+
+    from peak_enrichment import sample_background
+
+    class LastChoiceRNG(random.Random):
+        def __init__(self):
+            super().__init__(0)
+            self.starts = iter((0, 30))
+
+        def choice(self, values):
+            return values[-1]
+
+        def randrange(self, start, stop=None, step=1):
+            return next(self.starts)
+
+    foreground = [Interval("chr1", 5, 15), Interval("chr2", 5, 25)]
+    background = sample_background(
+        foreground,
+        {"chr1": 100, "chr2": 100},
+        {"chr1": "A" * 100, "chr2": "A" * 100},
+        [],
+        "gc_matched",
+        LastChoiceRNG(),
+        max_attempts=4,
+    )
+
+    assert background is not None
+    assert [interval.chrom for interval in background] == ["chr1", "chr2"]
+    assert [interval.width for interval in background] == [20, 20]
+
+
 def test_calculate_enrichment_reports_ratio_and_upper_tail_p_value():
     from peak_enrichment import calculate_enrichment
 
@@ -218,6 +250,78 @@ def test_calculate_enrichment_reports_ratio_and_upper_tail_p_value():
     assert all(row["observed_overlap_count"] == 1 for row in rows)
     assert all(0 <= row["empirical_p_value"] <= 1 for row in rows)
     assert all(row["permutations_succeeded"] <= 20 for row in rows)
+
+
+def test_calculate_enrichment_marks_partial_permutations_insufficient(monkeypatch):
+    import peak_enrichment
+
+    calls_by_model = {}
+
+    def sample_once_then_fail(
+        foreground,
+        chrom_sizes,
+        fasta_sequences,
+        blacklist,
+        model,
+        rng,
+        max_attempts,
+        gc_tolerance,
+    ):
+        calls_by_model[model] = calls_by_model.get(model, 0) + 1
+        if calls_by_model[model] == 1:
+            return [Interval("chr1", 50, 60)]
+        return None
+
+    monkeypatch.setattr(peak_enrichment, "sample_background", sample_once_then_fail)
+
+    rows = peak_enrichment.calculate_enrichment(
+        [Interval("chr1", 10, 20)],
+        [Interval("chr1", 10, 20)],
+        {"chr1": 100},
+        {"chr1": "A" * 100},
+        [],
+        permutations=3,
+        seed=11,
+        gc_tolerance=0.02,
+    )
+
+    assert {row["status"] for row in rows} == {"insufficient_background"}
+    assert {row["permutations_succeeded"] for row in rows} == {1}
+    assert all(row["observed_overlap_count"] == 1 for row in rows)
+    for field in (
+        "null_mean_overlap",
+        "null_sd_overlap",
+        "enrichment_ratio",
+        "empirical_p_value",
+    ):
+        assert all(row[field] is None for row in rows)
+
+
+def test_calculate_enrichment_marks_zero_null_mean_non_success(monkeypatch):
+    import peak_enrichment
+
+    monkeypatch.setattr(
+        peak_enrichment,
+        "sample_background",
+        lambda *args, **kwargs: [Interval("chr1", 50, 60)],
+    )
+
+    rows = peak_enrichment.calculate_enrichment(
+        [Interval("chr1", 10, 20)],
+        [Interval("chr1", 10, 20)],
+        {"chr1": 100},
+        {"chr1": "A" * 100},
+        [],
+        permutations=3,
+        seed=11,
+        gc_tolerance=0.02,
+    )
+
+    assert {row["status"] for row in rows} == {"zero_null_mean"}
+    assert {row["null_mean_overlap"] for row in rows} == {0}
+    assert {row["null_sd_overlap"] for row in rows} == {0.0}
+    assert all(row["enrichment_ratio"] is None for row in rows)
+    assert all(row["empirical_p_value"] is None for row in rows)
 
 
 def test_calculate_enrichment_emits_status_rows_for_empty_inputs():
@@ -268,6 +372,56 @@ def test_cli_resolves_chipseq_peak_paths_relative_to_manifest(tmp_path):
     assert references[0].reference_type == "chipseq"
 
 
+def test_public_chipseq_validation_parses_csv_and_forces_chipseq_type(
+    tmp_path,
+    capsys,
+):
+    import json
+
+    from peak_enrichment import main
+
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\n" + ("ACGT" * 25) + "\n", encoding="utf-8")
+    peaks = tmp_path / "prior,quoted.bed"
+    peaks.write_text("chr1\t10\t20\n", encoding="utf-8")
+    manifest = tmp_path / "chipseq.csv"
+    with manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=["reference_id", "tf", "peak_file", "reference_type"],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "reference_id": "public_ctcf",
+                "tf": "CTCF, public reference",
+                "peak_file": peaks.name,
+                "reference_type": "called_tf",
+            }
+        )
+
+    exit_code = main(
+        [
+            "validate-chipseq-manifest",
+            "--manifest",
+            str(manifest),
+            "--fasta",
+            str(fasta),
+        ]
+    )
+
+    assert exit_code == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows == [
+        {
+            "reference_id": "public_ctcf",
+            "tf": "CTCF, public reference",
+            "reference_type": "chipseq",
+            "peak_file": str(peaks.resolve()),
+        }
+    ]
+
+
 def test_load_reference_manifest_rejects_duplicate_ids_and_invalid_peak_rows(tmp_path):
     from peak_enrichment import load_reference_manifest
 
@@ -309,6 +463,28 @@ def test_cli_writes_all_four_matrices_plots_and_status_output(tmp_path):
 
     rows = _read_tsv(outdir / "peak_enrichment.tsv")
     assert len(rows) == 4
+    assert list(rows[0]) == [
+        "foreground_id",
+        "foreground_tf",
+        "reference_id",
+        "reference_type",
+        "reference_tf",
+        "background_model",
+        "foreground_peak_count",
+        "reference_peak_count",
+        "observed_overlap_count",
+        "null_mean_overlap",
+        "null_sd_overlap",
+        "enrichment_ratio",
+        "empirical_p_value",
+        "permutations_requested",
+        "permutations_succeeded",
+        "seed",
+        "status",
+    ]
+    assert {row["reference_type"] for row in rows} == {"chipseq"}
+    assert {row["foreground_peak_count"] for row in rows} == {"2"}
+    assert {row["reference_peak_count"] for row in rows} == {"2"}
     assert {row["reference_id"] for row in rows} == {"ref_ctcf_prior"}
     assert {row["background_model"] for row in rows} == {
         "random",
@@ -321,6 +497,32 @@ def test_cli_writes_all_four_matrices_plots_and_status_output(tmp_path):
     assert matrix_rows[0]["foreground_id"] == "fg_ctcf"
     assert "ref_ctcf_prior" in matrix_rows[0]
     assert "fg_ctcf" not in matrix_rows[0]
+
+
+def test_observed_vs_null_plot_draws_null_sd_uncertainty():
+    from matplotlib.container import ErrorbarContainer
+
+    from peak_enrichment import _load_pyplot, _plot_observed_vs_null
+
+    pyplot = _load_pyplot()
+    figure, axis = pyplot.subplots()
+    _plot_observed_vs_null(
+        axis,
+        [
+            {
+                "foreground_id": "fg",
+                "reference_id": "ref",
+                "background_model": "random",
+                "status": "ok",
+                "observed_overlap_count": 4,
+                "null_mean_overlap": 2.0,
+                "null_sd_overlap": 0.5,
+            }
+        ],
+    )
+
+    assert any(isinstance(container, ErrorbarContainer) for container in axis.containers)
+    pyplot.close(figure)
 
 
 def test_cli_emits_status_only_outputs_when_foreground_manifest_has_no_rows(tmp_path):

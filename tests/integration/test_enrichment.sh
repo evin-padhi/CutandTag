@@ -9,6 +9,7 @@ required_files=(
   nextflow.config
   nextflow_schema.json
   conf/test.config
+  bin/peak_enrichment.py
   modules/local/validate_chipseq_manifest.nf
   subworkflows/local/enrichment.nf
 )
@@ -56,10 +57,10 @@ checks = {
             "--enrichment_gc_tolerance",
         ))
         and "parameter_map = new LinkedHashMap(validated)" in main,
-    "launch-time chipseq manifest validation is part of validatePipelineParameters":
+    "launch-time chipseq validation uses the tested Python CSV utility":
         "validateChipseqManifestAtLaunch" in main
-        and "loadFastaChromSizes" in main
-        and "validateBedIntervalsAgainstFasta" in main
+        and "validate-chipseq-manifest" in main
+        and "new ProcessBuilder" in main
         and re.search(
             r"validated\.chipseq_input\s*=\s*validateChipseqManifestAtLaunch\(",
             main,
@@ -86,9 +87,11 @@ checks = {
     "existing required-input rules remain intact":
         schema["required"] == ["input", "macs_genome_size"]
         and schema["allOf"],
-    "main constructs an empty chipseq channel when the manifest is absent":
-        "chipseq_manifest_ch = optionalPathChannel(validated.chipseq_input)" in main
-        or "chipseq_manifest_ch = Channel.empty()" in main,
+    "main parses public chipseq CSV with splitCsv and forces public references to chipseq":
+        ".splitCsv(header: true)" in main
+        and "reference_type: 'chipseq'" in main
+        and "chipseq_reference_inputs_ch = Channel.empty()" in main
+        and "['reference_type']" not in main,
     "main wires ENRICHMENT conditionally and merges its versions":
         "ENRICHMENT(" in main
         and "enrichment_versions_ch = Channel.empty()" in main
@@ -102,6 +105,40 @@ checks = {
         and "peak_enrichment.py" in validate_chipseq
         and "normalized_chipseq_manifest.tsv" in validate_chipseq
         and "csv.DictWriter" in validate_chipseq,
+    "every external chipseq BED is a staged path dependency and emitted for enrichment":
+        "path(reference_peak_files" in validate_chipseq
+        and 'path "reference_peaks/*.bed", emit: peaks' in validate_chipseq
+        and enrichment.count("path external_peak_files") >= 2
+        and "VALIDATE_CHIPSEQ_MANIFEST.out.peaks" in enrichment,
+    "normalized chipseq manifests contain only staged relative peak paths":
+        '"peak_file": f"reference_peaks/{destination.name}"' in validate_chipseq
+        and "str(record.peak_file)" not in validate_chipseq
+        and "chipseq/reference_manifest.tsv" in enrichment,
+    "repository enrichment scripts are staged safely instead of source-interpolated":
+        "path enrichment_script, stageAs: 'bin/peak_enrichment.py'" in validate_chipseq
+        and enrichment.count("path enrichment_script, stageAs: 'bin/peak_enrichment.py'") >= 2
+        and "projectBin" not in validate_chipseq
+        and "projectBin" not in enrichment,
+    "Docker enrichment uses a pinned Python image containing matplotlib":
+        all(
+            re.search(
+                rf"process {process_name} \{{.*?"
+                r"container 'quay.io/jupyter/scipy-notebook:82d322f00937'",
+                enrichment,
+                re.S,
+            )
+            for process_name in (
+                "RUN_PEAK_ENRICHMENT",
+                "WRITE_EMPTY_ENRICHMENT_OUTPUTS",
+            )
+        ),
+    "called-TF identifiers are collision-resistant and DSL2 wiring avoids deprecated into":
+        "MessageDigest.getInstance('SHA-256')" in enrichment
+        and "foregroundHash" in enrichment
+        and ".into {" not in enrichment,
+    "enrichment artifacts publish under the specified enrichment directory":
+        enrichment.count('${params.outdir}/enrichment') >= 2
+        and '${params.outdir}/peak_enrichment' not in enrichment,
     "ENRICHMENT validates metadata and prepares normalized manifests":
         "workflow ENRICHMENT" in enrichment
         and "foreground_id" in enrichment

@@ -546,6 +546,7 @@ def append_yaml_sections(handle, sections):
     for key, metadata in sections:
         handle.write(f"  {key}:\n")
         handle.write(f'    fn: "{metadata["filename"]}"\n')
+    handle.write("ignore_images: false\n")
 
 
 demux_columns = [
@@ -730,22 +731,27 @@ write_table(
 )
 
 enrichment_columns = [
+    "comparison_id",
     "foreground_id",
     "foreground_tf",
     "reference_id",
+    "reference_type",
     "reference_tf",
     "background_model",
-    "seed",
-    "status",
-    "permutations_requested",
-    "permutations_succeeded",
+    "foreground_peak_count",
+    "reference_peak_count",
     "observed_overlap_count",
-    "null_mean_overlap_count",
-    "null_stddev_overlap_count",
+    "null_mean_overlap",
+    "null_sd_overlap",
     "enrichment_ratio",
     "empirical_p_value",
+    "permutations_requested",
+    "permutations_succeeded",
+    "seed",
+    "status",
 ]
 enrichment_rows = []
+seen_enrichment_comparisons = set()
 copied_enrichment = set()
 heatmap_models = [
     (
@@ -753,24 +759,28 @@ heatmap_models = [
         "Fully random genomic intervals.",
         "matrix_random.png",
         "matrix_random.tsv",
+        "nanocut_peak_enrichment_random_heatmap_mqc.png",
     ),
     (
         "length_matched",
         "Random intervals matched only on peak length.",
         "matrix_length_matched.png",
         "matrix_length_matched.tsv",
+        "nanocut_peak_enrichment_length_matched_heatmap_mqc.png",
     ),
     (
         "gc_matched",
         "Random intervals matched only on GC content.",
         "matrix_gc_matched.png",
         "matrix_gc_matched.tsv",
+        "nanocut_peak_enrichment_gc_matched_heatmap_mqc.png",
     ),
     (
         "length_gc_matched",
         "Random intervals matched on both length and GC content.",
         "matrix_length_gc_matched.png",
         "matrix_length_gc_matched.tsv",
+        "nanocut_peak_enrichment_length_gc_matched_heatmap_mqc.png",
     ),
 ]
 
@@ -789,7 +799,15 @@ def register_enrichment_file(path):
                 and row.get("background_model")
                 and row.get("status") == "ok"
             ):
-                enrichment_rows.append(row)
+                comparison_id = (
+                    f"{row['foreground_id']}|{row['reference_id']}|{row['background_model']}"
+                )
+                if comparison_id in seen_enrichment_comparisons:
+                    raise SystemExit(
+                        f"duplicate enrichment comparison_id: {comparison_id}"
+                    )
+                seen_enrichment_comparisons.add(comparison_id)
+                enrichment_rows.append({"comparison_id": comparison_id, **row})
 
 
 for path_text in sorted(glob.glob("enrichment*/*")):
@@ -802,6 +820,15 @@ for path_text in sorted(glob.glob("enrichment*/*")):
         register_enrichment_file(path)
 
 if enrichment_rows:
+    for model, description, heatmap_png, matrix_tsv, heatmap_asset in heatmap_models:
+        heatmap_path = Path(heatmap_png)
+        matrix_path = Path(matrix_tsv)
+        if not heatmap_path.is_file() or not matrix_path.is_file():
+            raise SystemExit(
+                f"missing enrichment heatmap assets for {model}: "
+                f"{heatmap_png}, {matrix_tsv}"
+            )
+        shutil.copyfile(heatmap_path, custom_dir / heatmap_asset)
     write_table(
         custom_dir / "nanocut_peak_enrichment_mqc.tsv",
         enrichment_columns,
@@ -824,7 +851,7 @@ if enrichment_rows:
         handle.write(
             "Null models and heatmaps:\n"
         )
-        for model, description, heatmap_png, matrix_tsv in heatmap_models:
+        for model, description, heatmap_png, matrix_tsv, heatmap_asset in heatmap_models:
             handle.write(
                 f"- `{model}` — {description} "
                 f"[heatmap]({heatmap_png}), "
@@ -910,6 +937,19 @@ if enrichment_rows:
             },
         )
     )
+    for model, description, heatmap_png, matrix_tsv, heatmap_asset in heatmap_models:
+        config_sections.append(
+            (
+                f"nanocut_peak_enrichment_{model}_heatmap",
+                {
+                    "section_name": f"Peak enrichment heatmap: {model}",
+                    "description": description,
+                    "plot_type": "image",
+                    "file_format": "png",
+                    "filename": heatmap_asset,
+                },
+            )
+        )
 
 with open("multiqc_config.yml", "w", encoding="utf-8") as handle:
     append_yaml_sections(handle, config_sections)

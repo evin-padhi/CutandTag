@@ -8,6 +8,7 @@ from bisect import bisect_left
 from collections import defaultdict
 import csv
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import random
 import re
@@ -21,17 +22,20 @@ ENRICHMENT_FIELDNAMES = [
     "foreground_id",
     "foreground_tf",
     "reference_id",
+    "reference_type",
     "reference_tf",
     "background_model",
-    "seed",
-    "status",
-    "permutations_requested",
-    "permutations_succeeded",
+    "foreground_peak_count",
+    "reference_peak_count",
     "observed_overlap_count",
-    "null_mean_overlap_count",
-    "null_stddev_overlap_count",
+    "null_mean_overlap",
+    "null_sd_overlap",
     "enrichment_ratio",
     "empirical_p_value",
+    "permutations_requested",
+    "permutations_succeeded",
+    "seed",
+    "status",
 ]
 STATUS_FIELDNAMES = [
     "foreground_id",
@@ -166,14 +170,16 @@ def _pick_candidate_coordinates(
     model: str,
     foreground_interval: Interval,
 ) -> tuple[str, int]:
-    foreground_chroms = [interval.chrom for interval in foreground]
     foreground_widths = [interval.width for interval in foreground]
 
     if model in {"length_matched", "length_gc_matched"}:
         chrom = foreground_interval.chrom
         width = foreground_interval.width
-    elif model in {"random", "gc_matched"}:
-        chrom = rng.choice(foreground_chroms)
+    elif model == "gc_matched":
+        chrom = foreground_interval.chrom
+        width = rng.choice(foreground_widths)
+    elif model == "random":
+        chrom = rng.choice([interval.chrom for interval in foreground])
         width = rng.choice(foreground_widths)
     else:
         raise ValueError(f"unknown background model {model!r}")
@@ -250,16 +256,27 @@ def sample_background(
     return placed
 
 
-def _blank_row(model: str, seed: str, status: str, permutations: int) -> dict[str, object]:
+def _blank_row(
+    model: str,
+    seed: str,
+    status: str,
+    permutations: int,
+    foreground_peak_count: int,
+    reference_peak_count: int,
+    observed_overlap_count: int | None = None,
+    permutations_succeeded: int = 0,
+) -> dict[str, object]:
     return {
         "background_model": model,
         "seed": seed,
         "status": status,
         "permutations_requested": permutations,
-        "permutations_succeeded": 0,
-        "observed_overlap_count": None,
-        "null_mean_overlap_count": None,
-        "null_stddev_overlap_count": None,
+        "permutations_succeeded": permutations_succeeded,
+        "foreground_peak_count": foreground_peak_count,
+        "reference_peak_count": reference_peak_count,
+        "observed_overlap_count": observed_overlap_count,
+        "null_mean_overlap": None,
+        "null_sd_overlap": None,
         "enrichment_ratio": None,
         "empirical_p_value": None,
     }
@@ -289,10 +306,28 @@ def calculate_enrichment(
     for model in models:
         model_seed = f"{seed}:{model}"
         if not foreground:
-            rows.append(_blank_row(model, model_seed, "no_foreground_peaks", permutations))
+            rows.append(
+                _blank_row(
+                    model,
+                    model_seed,
+                    "no_foreground_peaks",
+                    permutations,
+                    len(foreground),
+                    len(reference),
+                )
+            )
             continue
         if not reference:
-            rows.append(_blank_row(model, model_seed, "no_reference_peaks", permutations))
+            rows.append(
+                _blank_row(
+                    model,
+                    model_seed,
+                    "no_reference_peaks",
+                    permutations,
+                    len(foreground),
+                    len(reference),
+                )
+            )
             continue
 
         model_rng = random.Random(model_seed)
@@ -314,18 +349,45 @@ def calculate_enrichment(
             null_counts.append(count_overlapping_foreground(background, reference))
 
         successful = len(null_counts)
-        if successful == 0:
-            rows.append(_blank_row(model, model_seed, "insufficient_background", permutations))
-            rows[-1]["observed_overlap_count"] = observed_overlap_count
+        if successful < permutations or successful == 0:
+            rows.append(
+                _blank_row(
+                    model,
+                    model_seed,
+                    "insufficient_background",
+                    permutations,
+                    len(foreground),
+                    len(reference),
+                    observed_overlap_count=observed_overlap_count,
+                    permutations_succeeded=successful,
+                )
+            )
             continue
 
-        null_mean_overlap_count = mean(null_counts)
-        null_stddev_overlap_count = pstdev(null_counts) if successful > 1 else 0.0
+        null_mean_overlap = mean(null_counts)
+        null_sd_overlap = pstdev(null_counts) if successful > 1 else 0.0
+        if null_mean_overlap == 0:
+            rows.append(
+                {
+                    "background_model": model,
+                    "seed": model_seed,
+                    "status": "zero_null_mean",
+                    "permutations_requested": permutations,
+                    "permutations_succeeded": successful,
+                    "foreground_peak_count": len(foreground),
+                    "reference_peak_count": len(reference),
+                    "observed_overlap_count": observed_overlap_count,
+                    "null_mean_overlap": null_mean_overlap,
+                    "null_sd_overlap": null_sd_overlap,
+                    "enrichment_ratio": None,
+                    "empirical_p_value": None,
+                }
+            )
+            continue
+
         extreme_nulls = sum(count >= observed_overlap_count for count in null_counts)
         empirical_p_value = (1 + extreme_nulls) / (1 + successful)
-        enrichment_ratio = (
-            observed_overlap_count / null_mean_overlap_count if null_mean_overlap_count else None
-        )
+        enrichment_ratio = observed_overlap_count / null_mean_overlap
 
         rows.append(
             {
@@ -334,9 +396,11 @@ def calculate_enrichment(
                 "status": "ok",
                 "permutations_requested": permutations,
                 "permutations_succeeded": successful,
+                "foreground_peak_count": len(foreground),
+                "reference_peak_count": len(reference),
                 "observed_overlap_count": observed_overlap_count,
-                "null_mean_overlap_count": null_mean_overlap_count,
-                "null_stddev_overlap_count": null_stddev_overlap_count,
+                "null_mean_overlap": null_mean_overlap,
+                "null_sd_overlap": null_sd_overlap,
                 "enrichment_ratio": enrichment_ratio,
                 "empirical_p_value": empirical_p_value,
             }
@@ -484,6 +548,37 @@ def load_reference_manifest(path: str | Path, chrom_sizes: dict[str, int]) -> li
     return records
 
 
+def load_public_chipseq_manifest(
+    path: str | Path,
+    chrom_sizes: dict[str, int],
+) -> list[ReferenceRecord]:
+    """Load the public CSV contract, ignoring all non-contract columns."""
+    manifest_path = Path(path).resolve()
+    rows = _read_manifest_rows(
+        manifest_path,
+        ("reference_id", "tf", "peak_file"),
+    )
+    records: list[ReferenceRecord] = []
+    seen_ids: set[str] = set()
+
+    for row_number, row in rows:
+        reference_id = row["reference_id"]
+        _validate_identifier(reference_id, "reference_id", row_number)
+        if reference_id in seen_ids:
+            raise ValueError(f"row {row_number}: duplicate reference_id {reference_id!r}")
+        seen_ids.add(reference_id)
+        peak_file = _resolve_manifest_path(
+            row["peak_file"],
+            manifest_path,
+            row_number,
+            "peak_file",
+        )
+        parse_intervals(peak_file, chrom_sizes)
+        records.append(ReferenceRecord(reference_id, row["tf"], "chipseq", peak_file))
+
+    return records
+
+
 def _write_tsv(path: Path, fieldnames: Sequence[str], rows: Sequence[dict[str, object]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t")
@@ -575,9 +670,7 @@ def _write_heatmap_png(
     pyplot.close(figure)
 
 
-def _write_observed_vs_null_plot(path: Path, rows: Sequence[dict[str, object]]) -> None:
-    pyplot = _load_pyplot()
-    figure, axis = pyplot.subplots(figsize=(max(6, len(rows) * 1.0), 4))
+def _plot_observed_vs_null(axis, rows: Sequence[dict[str, object]]) -> None:
     ok_rows = [row for row in rows if row["status"] == "ok"]
     if ok_rows:
         ordered_rows = sorted(
@@ -594,9 +687,17 @@ def _write_observed_vs_null_plot(path: Path, rows: Sequence[dict[str, object]]) 
         ]
         positions = list(range(len(ordered_rows)))
         observed = [float(row["observed_overlap_count"]) for row in ordered_rows]
-        null_mean = [float(row["null_mean_overlap_count"]) for row in ordered_rows]
+        null_mean = [float(row["null_mean_overlap"]) for row in ordered_rows]
+        null_sd = [float(row["null_sd_overlap"]) for row in ordered_rows]
         axis.plot(positions, observed, marker="o", label="Observed overlaps")
-        axis.plot(positions, null_mean, marker="s", label="Null mean overlaps")
+        axis.errorbar(
+            positions,
+            null_mean,
+            yerr=null_sd,
+            marker="s",
+            capsize=3,
+            label="Null mean ± SD",
+        )
         axis.set_xticks(positions)
         axis.set_xticklabels(labels, rotation=45, ha="right")
         axis.legend()
@@ -605,6 +706,12 @@ def _write_observed_vs_null_plot(path: Path, rows: Sequence[dict[str, object]]) 
         axis.set_xticks([])
     axis.set_ylabel("Overlap count")
     axis.set_title("Observed vs null overlap summary")
+
+
+def _write_observed_vs_null_plot(path: Path, rows: Sequence[dict[str, object]]) -> None:
+    pyplot = _load_pyplot()
+    figure, axis = pyplot.subplots(figsize=(max(6, len(rows) * 1.0), 4))
+    _plot_observed_vs_null(axis, rows)
     figure.tight_layout()
     figure.savefig(path, dpi=150)
     pyplot.close(figure)
@@ -697,6 +804,7 @@ def run_cli(
                         "foreground_id": foreground.foreground_id,
                         "foreground_tf": foreground.foreground_tf,
                         "reference_id": reference.reference_id,
+                        "reference_type": reference.reference_type,
                         "reference_tf": reference.tf,
                         **row,
                     }
@@ -734,8 +842,45 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_validation_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Validate and normalize the public ChIP-seq CSV contract."
+    )
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--fasta", required=True)
+    return parser
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_argument_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments[:1] == ["validate-chipseq-manifest"]:
+        args = build_validation_argument_parser().parse_args(arguments[1:])
+        try:
+            fasta_sequences = load_fasta_sequences(args.fasta)
+            records = load_public_chipseq_manifest(
+                args.manifest,
+                {chrom: len(sequence) for chrom, sequence in fasta_sequences.items()},
+            )
+        except ValueError as error:
+            print(str(error), file=sys.stderr)
+            return 2
+        print(
+            json.dumps(
+                [
+                    {
+                        "reference_id": record.reference_id,
+                        "tf": record.tf,
+                        "reference_type": record.reference_type,
+                        "peak_file": str(record.peak_file),
+                    }
+                    for record in records
+                ],
+                sort_keys=True,
+            )
+        )
+        return 0
+
+    args = build_argument_parser().parse_args(arguments)
     try:
         run_cli(
             foreground_manifest=args.foreground_manifest,

@@ -144,6 +144,18 @@ required_phrases = [
     "broad",
     "narrow",
     "JASPAR",
+    "reference_id,tf,peak_file",
+    "random",
+    "length_matched",
+    "gc_matched",
+    "length_gc_matched",
+    "insufficient_background",
+    "zero_null_mean",
+    "no_foreground_peaks",
+    "no_reference_peaks",
+    "enrichment/",
+    "peak_enrichment.tsv",
+    "observed_vs_null.png",
     "-resume",
     "Nextflow runtime execution was not verified in this workspace",
 ]
@@ -192,7 +204,9 @@ dashboard_checks = {
         )),
     "Completion summary links enrichment TSV only when the dashboard artifacts exist":
         "path enrichment_files, stageAs: 'enrichment??/*'" in main
-        and "reports/summary/peak_enrichment.tsv" in main
+        and "enrichment/peak_enrichment.tsv" in main
+        and "enrichment/plots/observed_vs_null.png" in main
+        and "enrichment_heatmap_" in main
         and "if peak_enrichment_tables:" in main,
 }
 
