@@ -783,7 +783,12 @@ def register_enrichment_file(path):
     copied_enrichment.add(destination.name)
     if destination.name == "peak_enrichment.tsv":
         for row in read_table(path):
-            if row.get("foreground_id") and row.get("reference_id") and row.get("background_model"):
+            if (
+                row.get("foreground_id")
+                and row.get("reference_id")
+                and row.get("background_model")
+                and row.get("status") == "ok"
+            ):
                 enrichment_rows.append(row)
 
 

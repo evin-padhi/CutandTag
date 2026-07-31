@@ -171,6 +171,7 @@ dashboard_checks = {
         "path enrichment_files, stageAs: 'enrichment??/*'" in multiqc
         and "nanocut_peak_enrichment_mqc.tsv" in multiqc
         and "if enrichment_rows:" in multiqc
+        and "row.get(\"status\") == \"ok\"" in multiqc
         and "copyfile(" in multiqc
         and "publishDir" in multiqc
         and "pattern: 'peak_enrichment.tsv'" in multiqc
@@ -192,7 +193,7 @@ dashboard_checks = {
     "Completion summary links enrichment TSV only when the dashboard artifacts exist":
         "path enrichment_files, stageAs: 'enrichment??/*'" in main
         and "reports/summary/peak_enrichment.tsv" in main
-        and "if enrichment_tables:" in main,
+        and "if peak_enrichment_tables:" in main,
 }
 
 dashboard_failures = [
