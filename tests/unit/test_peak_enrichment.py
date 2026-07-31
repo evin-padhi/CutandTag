@@ -1,3 +1,4 @@
+import csv
 from pathlib import Path
 import sys
 
@@ -8,6 +9,67 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "bin"))
 
 from peak_enrichment import Interval, count_overlapping_foreground, parse_intervals
+
+
+def _read_tsv(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8", newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
+
+
+def run_enrichment_fixture(tmp_path: Path) -> Path:
+    from peak_enrichment import main
+
+    outdir = tmp_path / "enrichment"
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\n" + ("ACGT" * 50) + "\n", encoding="utf-8")
+
+    foreground_dir = tmp_path / "foreground"
+    foreground_dir.mkdir()
+    (foreground_dir / "ctcf.bed").write_text(
+        "chr1\t10\t20\nchr1\t40\t50\n",
+        encoding="utf-8",
+    )
+
+    reference_dir = tmp_path / "references"
+    reference_dir.mkdir()
+    (reference_dir / "ctcf.bed").write_text("chr1\t10\t20\n", encoding="utf-8")
+    (reference_dir / "gata1.bed").write_text("chr1\t12\t18\nchr1\t70\t80\n", encoding="utf-8")
+
+    foreground_manifest = tmp_path / "foregrounds.tsv"
+    foreground_manifest.write_text(
+        "foreground_id\tforeground_tf\tpeak_file\n"
+        "fg_ctcf\tCTCF\tforeground/ctcf.bed\n",
+        encoding="utf-8",
+    )
+    reference_manifest = tmp_path / "references.tsv"
+    reference_manifest.write_text(
+        "reference_id\ttf\treference_type\tpeak_file\n"
+        "ref_ctcf\tCTCF\tcalled_tf\treferences/ctcf.bed\n"
+        "ref_gata1\tGATA1\tchipseq\treferences/gata1.bed\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--foreground-manifest",
+            str(foreground_manifest),
+            "--reference-manifest",
+            str(reference_manifest),
+            "--fasta",
+            str(fasta),
+            "--outdir",
+            str(outdir),
+            "--permutations",
+            "8",
+            "--seed",
+            "1729",
+            "--gc-tolerance",
+            "0.02",
+        ]
+    )
+
+    assert exit_code == 0
+    return outdir
 
 
 def test_parse_intervals_rejects_unknown_chromosome_and_invalid_coordinates(tmp_path):
@@ -186,3 +248,75 @@ def test_calculate_enrichment_emits_status_rows_for_empty_inputs():
     assert {row["status"] for row in no_reference_rows} == {"no_reference_peaks"}
     assert all(row["observed_overlap_count"] is None for row in no_foreground_rows)
     assert all(row["observed_overlap_count"] is None for row in no_reference_rows)
+
+
+def test_cli_resolves_chipseq_peak_paths_relative_to_manifest(tmp_path):
+    from peak_enrichment import load_reference_manifest
+
+    manifest = tmp_path / "chipseq.csv"
+    peaks = tmp_path / "prior" / "ctcf.bed"
+    peaks.parent.mkdir()
+    peaks.write_text("chr1\t10\t20\n", encoding="utf-8")
+    manifest.write_text(
+        "reference_id,tf,peak_file\nctcf,CTCF,prior/ctcf.bed\n",
+        encoding="utf-8",
+    )
+
+    references = load_reference_manifest(manifest, {"chr1": 100})
+
+    assert references[0].peak_file == peaks.resolve()
+
+
+def test_load_reference_manifest_rejects_duplicate_ids_and_invalid_peak_rows(tmp_path):
+    from peak_enrichment import load_reference_manifest
+
+    first = tmp_path / "first.bed"
+    first.write_text("chr1\t10\t20\n", encoding="utf-8")
+    second = tmp_path / "second.bed"
+    second.write_text("chrX\t10\t20\n", encoding="utf-8")
+
+    duplicate_manifest = tmp_path / "duplicate.tsv"
+    duplicate_manifest.write_text(
+        "reference_id\ttf\tpeak_file\n"
+        "dup\tCTCF\tfirst.bed\n"
+        "dup\tGATA1\tfirst.bed\n",
+        encoding="utf-8",
+    )
+    invalid_peak_manifest = tmp_path / "invalid.tsv"
+    invalid_peak_manifest.write_text(
+        "reference_id\ttf\tpeak_file\n"
+        "bad\tGATA1\tsecond.bed\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate reference_id"):
+        load_reference_manifest(duplicate_manifest, {"chr1": 100})
+
+    with pytest.raises(ValueError, match="unknown chromosome"):
+        load_reference_manifest(invalid_peak_manifest, {"chr1": 100})
+
+
+def test_cli_writes_all_four_matrices_plots_and_status_output(tmp_path):
+    outdir = run_enrichment_fixture(tmp_path)
+
+    for model in ("random", "length_matched", "gc_matched", "length_gc_matched"):
+        assert (outdir / f"matrix_{model}.tsv").exists()
+        assert (outdir / f"matrix_{model}.png").exists()
+    assert (outdir / "peak_enrichment.tsv").exists()
+    assert (outdir / "observed_vs_null.png").exists()
+    assert (outdir / "enrichment_status.tsv").exists()
+
+    rows = _read_tsv(outdir / "peak_enrichment.tsv")
+    assert len(rows) == 4
+    assert {row["reference_id"] for row in rows} == {"ref_gata1"}
+    assert {row["background_model"] for row in rows} == {
+        "random",
+        "length_matched",
+        "gc_matched",
+        "length_gc_matched",
+    }
+
+    matrix_rows = _read_tsv(outdir / "matrix_random.tsv")
+    assert matrix_rows[0]["foreground_id"] == "fg_ctcf"
+    assert "ref_gata1" in matrix_rows[0]
+    assert "ref_ctcf" not in matrix_rows[0]
