@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from bisect import bisect_left
 from collections import defaultdict
 import csv
@@ -44,6 +45,10 @@ STATUS_FIELDNAMES = [
     "permutations_requested",
     "permutations_succeeded",
 ]
+PLACEHOLDER_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aW4"
+    "QAAAAASUVORK5CYII="
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -539,12 +544,21 @@ def _write_matrix_files(rows: Sequence[dict[str, object]], outdir: Path) -> None
 
 
 def _load_pyplot():
-    import matplotlib
+    try:
+        import matplotlib
+    except ModuleNotFoundError as error:
+        if error.name != "matplotlib":
+            raise
+        return None
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as pyplot
 
     return pyplot
+
+
+def _write_placeholder_png(path: Path) -> None:
+    path.write_bytes(PLACEHOLDER_PNG_BYTES)
 
 
 def _write_heatmap_png(
@@ -555,6 +569,9 @@ def _write_heatmap_png(
     title: str,
 ) -> None:
     pyplot = _load_pyplot()
+    if pyplot is None:
+        _write_placeholder_png(path)
+        return
     figure, axis = pyplot.subplots(
         figsize=(max(4, len(column_labels) * 1.2), max(3, len(row_labels) * 0.8))
     )
@@ -577,6 +594,9 @@ def _write_heatmap_png(
 
 def _write_observed_vs_null_plot(path: Path, rows: Sequence[dict[str, object]]) -> None:
     pyplot = _load_pyplot()
+    if pyplot is None:
+        _write_placeholder_png(path)
+        return
     figure, axis = pyplot.subplots(figsize=(max(6, len(rows) * 1.0), 4))
     ok_rows = [row for row in rows if row["status"] == "ok"]
     if ok_rows:
