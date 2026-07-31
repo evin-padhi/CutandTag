@@ -45,6 +45,7 @@ workflow QC {
     demultiplex_metrics
     fastqc_reports
     motif_metrics
+    enrichment_files
     gtf
     tss_bed
 
@@ -287,6 +288,9 @@ workflow QC {
             [files: holder.files + [path]]
         }
         .map { holder -> holder.files }
+    safe_enrichment_files = enrichment_files
+        .collect(flat: false)
+        .ifEmpty { ignored -> [] }
     tss_status_files = TSS_ENRICHMENT.out.profiles
         .map { meta, bed, matrix, matrixTable, profile, status -> status }
         .reduce([files: []]) { holder, path ->
@@ -302,6 +306,7 @@ workflow QC {
         peak_qc_files,
         motif_metric_files,
         tss_status_files,
+        safe_enrichment_files,
         annotation_status
     )
 
@@ -316,6 +321,7 @@ workflow QC {
     target_fragments = BAM_TO_FRAGMENTS.out.fragments
     target_qc = PEAK_QC.out.qc
     combined_summary = MULTIQC.out.combined_summary
+    enrichment_table = MULTIQC.out.enrichment_table
     tss_profiles = TSS_ENRICHMENT.out.profiles
     multiqc_report = MULTIQC.out.report
     multiqc_data = MULTIQC.out.data

@@ -784,6 +784,7 @@ process WRITE_COMPLETION_SUMMARY {
     input:
     path multiqc_report, stageAs: 'report/multiqc_report.html'
     path combined_summary, stageAs: 'report/combined_target_qc.tsv'
+    path enrichment_files, stageAs: 'enrichment??/*'
     path software_versions, stageAs: 'pipeline/software_versions.yml'
     path validated_parameters, stageAs: 'pipeline/validated_parameters.json'
 
@@ -810,12 +811,20 @@ if not Path("report/multiqc_report.html").stat().st_size:
     raise SystemExit("MultiQC report is empty")
 if not Path("pipeline/software_versions.yml").stat().st_size:
     raise SystemExit("software version manifest is empty")
+enrichment_tables = sorted(Path().glob("enrichment*/*"))
+peak_enrichment_tables = [
+    path for path in enrichment_tables if path.name == "peak_enrichment.tsv"
+]
+if len(peak_enrichment_tables) > 1:
+    raise SystemExit("expected at most one peak_enrichment.tsv in completion summary inputs")
 with open("run_summary.txt", "w", encoding="utf-8") as output:
     output.write("status\\tsucceeded\\n")
     output.write(f"target_count\\t{len(targets)}\\n")
     output.write(f"motif_enabled\\t{str(bool(parameters['motif_db'])).lower()}\\n")
     output.write("report\\treports/multiqc/multiqc_report.html\\n")
     output.write("target_summary\\treports/summary/combined_target_qc.tsv\\n")
+    if peak_enrichment_tables:
+        output.write("peak_enrichment\\treports/summary/peak_enrichment.tsv\\n")
     output.write("versions\\tpipeline_info/software_versions.yml\\n")
 PY
     '''
@@ -843,6 +852,7 @@ workflow NANOCUT {
     enrichment_results_ch = Channel.empty()
     enrichment_status_ch = Channel.empty()
     enrichment_plots_ch = Channel.empty()
+    enrichment_dashboard_files_ch = Channel.empty()
     enrichment_versions_ch = Channel.empty()
 
     DEMULTIPLEX(
@@ -922,6 +932,9 @@ workflow NANOCUT {
         enrichment_results_ch = ENRICHMENT.out.results
         enrichment_status_ch = ENRICHMENT.out.status
         enrichment_plots_ch = ENRICHMENT.out.plots
+        enrichment_dashboard_files_ch = ENRICHMENT.out.results.mix(
+            ENRICHMENT.out.plots
+        )
         enrichment_versions_ch = ENRICHMENT.out.versions
     }
 
@@ -933,6 +946,7 @@ workflow NANOCUT {
         DEMULTIPLEX.out.metrics,
         DEMULTIPLEX.out.fastqc,
         motif_metrics_ch,
+        enrichment_dashboard_files_ch,
         gtf_ch,
         tss_bed_ch
     )
@@ -957,10 +971,14 @@ workflow NANOCUT {
         versionPath(record)
     }.collect()
     COLLECT_VERSIONS(version_files_ch)
+    completion_summary_enrichment = QC.out.enrichment_table
+        .collect(flat: false)
+        .ifEmpty { ignored -> [] }
 
     WRITE_COMPLETION_SUMMARY(
         QC.out.multiqc_report,
         QC.out.combined_summary,
+        completion_summary_enrichment,
         COLLECT_VERSIONS.out.versions,
         WRITE_PIPELINE_PARAMETERS.out.parameters
     )
