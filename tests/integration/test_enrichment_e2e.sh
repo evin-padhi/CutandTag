@@ -4,6 +4,31 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
+base_python=$(command -v python3 || true)
+if [[ -z "$base_python" ]]; then
+  printf 'FAIL: python3 is required for enrichment fixture setup\n' >&2
+  exit 1
+fi
+
+plot_python=""
+for candidate in python3.11 python3.12 python3 python; do
+  if ! command -v "$candidate" >/dev/null 2>&1; then
+    continue
+  fi
+  if "$candidate" - <<'PY' >/dev/null 2>&1
+import matplotlib
+PY
+  then
+    plot_python=$(command -v "$candidate")
+    break
+  fi
+done
+
+if [[ -z "$plot_python" ]]; then
+  printf 'FAIL: no Python interpreter with matplotlib is available for real enrichment plot generation\n' >&2
+  exit 1
+fi
+
 required_files=(
   main.nf
   conf/test.config
@@ -26,7 +51,7 @@ tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/nanocut-enrichment-e2e.XXXXXX")
 trap 'rm -rf -- "${tmp_dir:?}"' EXIT
 
 combined_manifest="$tmp_dir/reference_manifest.tsv"
-python3 - "$repo_root" "$combined_manifest" <<'PY'
+"$base_python" - "$repo_root" "$combined_manifest" <<'PY'
 import csv
 import sys
 from pathlib import Path
@@ -71,7 +96,10 @@ with output.open("w", newline="", encoding="utf-8") as handle:
 PY
 
 cli_outdir="$tmp_dir/cli"
-python3 bin/peak_enrichment.py \
+mpl_config_dir="$tmp_dir/mplconfig"
+mkdir -p "$mpl_config_dir"
+
+MPLCONFIGDIR="$mpl_config_dir" "$plot_python" bin/peak_enrichment.py \
   --foreground-manifest tests/data/enrichment/foregrounds.tsv \
   --reference-manifest "$combined_manifest" \
   --fasta tests/data/enrichment/reference.fa \
@@ -80,7 +108,7 @@ python3 bin/peak_enrichment.py \
   --seed 1729 \
   --gc-tolerance 0.02
 
-python3 - "$cli_outdir" <<'PY'
+"$base_python" - "$cli_outdir" <<'PY'
 import csv
 import math
 import sys
@@ -145,10 +173,18 @@ if len(status_rows) != len(rows):
 
 if {row["background_model"] for row in status_rows} != models:
     raise SystemExit("FAIL: status table background models did not match the enrichment rows")
+
+png_signature = b"\x89PNG\r\n\x1a\n"
+for path in sorted(outdir.glob("*.png")):
+    data = path.read_bytes()
+    if not data.startswith(png_signature):
+        raise SystemExit(f"FAIL: {path.name} is not a PNG file")
+    if len(data) <= 500:
+        raise SystemExit(f"FAIL: {path.name} is too small to be a real matplotlib plot")
 PY
 
 malformed_manifest="$tmp_dir/malformed.csv"
-python3 - "$malformed_manifest" <<'PY'
+"$base_python" - "$malformed_manifest" <<'PY'
 import csv
 import sys
 from pathlib import Path
@@ -163,7 +199,7 @@ with path.open("w", newline="", encoding="utf-8") as handle:
 PY
 
 set +e
-python3 bin/peak_enrichment.py \
+"$base_python" bin/peak_enrichment.py \
   --foreground-manifest tests/data/enrichment/foregrounds.tsv \
   --reference-manifest "$malformed_manifest" \
   --fasta tests/data/enrichment/reference.fa \
@@ -183,6 +219,34 @@ fi
 if ! grep -q 'duplicate reference_id' "$tmp_dir/malformed.stderr"; then
   printf 'FAIL: malformed manifest did not report duplicate reference_id\n' >&2
   exit 1
+fi
+
+if ! "$base_python" - <<'PY' >/dev/null 2>&1
+import matplotlib
+PY
+then
+  set +e
+  "$base_python" bin/peak_enrichment.py \
+    --foreground-manifest tests/data/enrichment/foregrounds.tsv \
+    --reference-manifest "$combined_manifest" \
+    --fasta tests/data/enrichment/reference.fa \
+    --outdir "$tmp_dir/base-python-out" \
+    --permutations 20 \
+    --seed 1729 \
+    --gc-tolerance 0.02 \
+    >"$tmp_dir/base-python.stdout" 2>"$tmp_dir/base-python.stderr"
+  missing_dep_status=$?
+  set -e
+
+  if [[ $missing_dep_status -eq 0 ]]; then
+    printf 'FAIL: matplotlib-missing interpreter unexpectedly generated plots successfully\n' >&2
+    exit 1
+  fi
+
+  if ! grep -qi 'matplotlib' "$tmp_dir/base-python.stderr"; then
+    printf 'FAIL: matplotlib-missing interpreter did not report the missing plotting dependency\n' >&2
+    exit 1
+  fi
 fi
 
 if ! command -v nextflow >/dev/null 2>&1; then
