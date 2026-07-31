@@ -2,7 +2,6 @@
 .nextflow/
 .nextflow.*
 .nextflow-conda/
-.worktrees/
 work/
 
 # Default and test result directories

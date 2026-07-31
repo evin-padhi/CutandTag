@@ -3,6 +3,7 @@ include { FILTERED_BAM_QC } from '../../modules/local/filtered_bam_qc'
 include { PEAK_QC } from '../../modules/local/peak_qc'
 include { TSS_ENRICHMENT } from '../../modules/local/tss_enrichment'
 include { DEMUX_QC_CUSTOM; LIBRARY_QC_CUSTOM; MOTIF_QC_CUSTOM; MULTIQC } from '../../modules/local/multiqc'
+include { QC_DASHBOARD } from '../../modules/local/qc_dashboard'
 
 def validateQcMeta(rawMeta, context) {
     def safeId = /[A-Za-z0-9][A-Za-z0-9._-]*/
@@ -48,6 +49,8 @@ workflow QC {
     enrichment_files
     gtf
     tss_bed
+    motif_ame_results
+    motif_ame_statuses
 
     main:
     safe_filtered_bams = filtered_bams.map { meta, bam, bai ->
@@ -90,6 +93,31 @@ workflow QC {
         }
         tuple(safeMeta, motifTsv)
     }
+
+    dashboard_metadata = safe_library_metrics
+        .map {
+            meta, flagstat, stats, idxstats, insertSize, duplicateMetrics ->
+            new LinkedHashMap(meta)
+        }
+        .reduce([records: []]) { holder, record ->
+            [records: holder.records + [record]]
+        }
+        .map { holder ->
+            def records = holder.records.sort {
+                left, right -> left.sample_id <=> right.sample_id
+            }
+            def sampleIds = records.collect { record -> record.sample_id }
+            if (sampleIds.size() != sampleIds.toSet().size()) {
+                def duplicate = sampleIds.countBy { it }
+                    .find { sampleId, count -> count > 1 }
+                    .key
+                throw new IllegalStateException(
+                    "duplicate dashboard metadata sample_id ${duplicate}"
+                )
+            }
+            def json = groovy.json.JsonOutput.toJson(records)
+            json.getBytes('UTF-8').encodeBase64().toString()
+        }
 
     /*
      * Only non-control filtered BAMs can enter fragment conversion and FRiP.
@@ -245,6 +273,12 @@ workflow QC {
     LIBRARY_QC_CUSTOM(library_qc_inputs)
     MOTIF_QC_CUSTOM(safe_motif_metrics)
 
+    raw_demultiplex_json_files = demultiplex_metrics
+        .map { meta, json, tsv -> json }
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     fastqc_files = fastqc_reports.flatMap { meta, html, zip ->
         def files = []
         [html, zip].each { value ->
@@ -282,6 +316,18 @@ workflow QC {
             [files: holder.files + [path]]
         }
         .map { holder -> holder.files }
+    peak_width_histogram_files = PEAK_QC.out.qc
+        .map { meta, json, tsv, histogram, perPeak -> histogram }
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
+    peak_fragment_count_files = PEAK_QC.out.qc
+        .map { meta, json, tsv, histogram, perPeak -> perPeak }
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
     motif_metric_files = MOTIF_QC_CUSTOM.out.custom
         .map { meta, custom -> custom }
         .reduce([files: []]) { holder, path ->
@@ -292,11 +338,95 @@ workflow QC {
         .collect(flat: false)
         .ifEmpty { ignored -> [] }
     tss_status_files = TSS_ENRICHMENT.out.profiles
-        .map { meta, bed, matrix, matrixTable, profile, status -> status }
+        .map { meta, bed, matrix, matrixTable, profile, profileTable, status -> status }
         .reduce([files: []]) { holder, path ->
             [files: holder.files + [path]]
         }
         .map { holder -> holder.files }
+    tss_profile_data_files = TSS_ENRICHMENT.out.profiles
+        .map { meta, bed, matrix, matrixTable, profile, profileTable, status -> profileTable }
+        .reduce([files: []]) { holder, path ->
+            [files: holder.files + [path]]
+        }
+        .map { holder -> holder.files }
+    ame_result_collections = motif_ame_results
+        .map { meta, ameDir ->
+            def safeMeta = validateQcMeta(meta, 'AME result')
+            if (safeMeta.is_control) {
+                throw new IllegalArgumentException(
+                    "IgG control ${safeMeta.sample_id} cannot have an AME result"
+                )
+            }
+            tuple(safeMeta.sample_id, ameDir)
+        }
+        .reduce([files: []]) { holder, row ->
+            [files: holder.files + [row]]
+        }
+        .map { holder ->
+            def rows = holder.files.sort { left, right -> left[0] <=> right[0] }
+            def sampleIds = rows.collect { row -> row[0] }
+            if (sampleIds.size() != sampleIds.toSet().size()) {
+                throw new IllegalStateException(
+                    "duplicate AME result sample_id"
+                )
+            }
+            [
+                sample_ids: sampleIds,
+                files: rows.collect { row -> row[1] },
+            ]
+        }
+    ame_result_files = ame_result_collections.map { holder -> holder.files }
+    ame_result_sample_ids = ame_result_collections.map {
+        holder -> holder.sample_ids
+    }
+    ame_status_collections = motif_ame_statuses
+        .map { meta, status ->
+            def safeMeta = validateQcMeta(meta, 'AME status')
+            if (safeMeta.is_control) {
+                throw new IllegalArgumentException(
+                    "IgG control ${safeMeta.sample_id} cannot have an AME status"
+                )
+            }
+            tuple(safeMeta.sample_id, status)
+        }
+        .reduce([files: []]) { holder, row ->
+            [files: holder.files + [row]]
+        }
+        .map { holder ->
+            def rows = holder.files.sort { left, right -> left[0] <=> right[0] }
+            def sampleIds = rows.collect { row -> row[0] }
+            if (sampleIds.size() != sampleIds.toSet().size()) {
+                throw new IllegalStateException(
+                    "duplicate AME status sample_id"
+                )
+            }
+            [
+                sample_ids: sampleIds,
+                files: rows.collect { row -> row[1] },
+            ]
+        }
+    ame_status_files = ame_status_collections.map { holder -> holder.files }
+    ame_status_sample_ids = ame_status_collections.map {
+        holder -> holder.sample_ids
+    }
+
+    QC_DASHBOARD(
+        dashboard_metadata,
+        raw_demultiplex_json_files,
+        library_custom_files,
+        insert_size_files,
+        peak_qc_files,
+        peak_width_histogram_files,
+        peak_fragment_count_files,
+        tss_profile_data_files,
+        tss_status_files,
+        motif_metric_files,
+        ame_result_files,
+        ame_result_sample_ids,
+        ame_status_files,
+        ame_status_sample_ids,
+        annotation_status
+    )
 
     MULTIQC(
         fastqc_files,
@@ -314,7 +444,8 @@ workflow QC {
         FILTERED_BAM_QC.out.versions,
         PEAK_QC.out.versions,
         TSS_ENRICHMENT.out.versions,
-        MULTIQC.out.versions
+        MULTIQC.out.versions,
+        QC_DASHBOARD.out.versions
     )
 
     emit:
@@ -328,5 +459,10 @@ workflow QC {
     multiqc_report = MULTIQC.out.report
     multiqc_data = MULTIQC.out.data
     multiqc_custom_content = MULTIQC.out.custom_content
+    qc_dashboard_report = QC_DASHBOARD.out.report
+    qc_summary_tsv = QC_DASHBOARD.out.summary_tsv
+    qc_summary_json = QC_DASHBOARD.out.summary_json
+    top_motifs = QC_DASHBOARD.out.top_motifs
+    qc_tss_profiles = QC_DASHBOARD.out.tss_profiles
     versions = versions_ch
 }

@@ -275,6 +275,7 @@ results/
     enrichment_status.tsv
     plots/
   reports/multiqc/
+  reports/qc_dashboard/
   reports/summary/
   pipeline_info/
 ```
@@ -303,6 +304,16 @@ results/
 - `reports/multiqc/multiqc_report.html` is the top-level report.
   `reports/summary/combined_target_qc.tsv` is the combined target broad-peak
   summary.
+- `reports/multiqc/multiqc_report.html` remains the MultiQC report.
+  `reports/qc_dashboard/qc_dashboard.html` is the detailed, self-contained
+  consolidated QC dashboard. It has no external `https://` dependencies and
+  is safe to copy with a results directory.
+- `reports/qc_dashboard/qc_summary.tsv` and `qc_summary.json` are reusable,
+  joined per-sample data products. `top_motifs.tsv` is the reusable top-ten AME
+  motif summary and `tss_profiles.tsv` is the reusable tidy TSS profile data
+  product. The TSS scalar is in `qc_summary.tsv` and `qc_summary.json`.
+  `reports/summary/combined_target_qc.tsv` remains the combined target
+  broad-peak summary.
 - `pipeline_info/` contains the normalized manifest, validated parameter JSON,
   software versions, completion summary, built index when applicable,
   execution report, timeline, trace, and DAG.
@@ -375,6 +386,118 @@ choices, blacklist coverage, and peak-set size can dominate the result.
 Empirical p-value resolution is limited by the permutation count, and the
 pipeline does not apply a multiple-comparison correction. Compare models and
 biological contexts deliberately rather than ranking ratios alone.
+### Dashboard visual summaries
+
+The HTML opens with six sequencing panels: assigned read pairs, barcode
+balance within each physical library, mapped reads, usable fragments after
+filtering, PCR duplication, and end-to-end usable yield. The five peak panels show
+peak count, FRiP, total bases covered, the peak-width median and range, and peak
+count versus usable fragments. Values are printed above bars, and axes include
+their units.
+
+Insert-size and peak-width distributions use normalized, shared 250-bp bins
+whose percentages are comparable across samples. The underlying
+`insert_size_distribution` and `width_distribution` arrays in
+`qc_summary.json` remain unbinned. The fragments-per-peak coverage ECDF is
+built from
+`qc/peaks/<sample_id>/<sample_id>.peak_qc.fragments_per_peak.tsv`; its public
+JSON representation is a compact `fragment_count`/`peak_count` histogram.
+Peaks with no overlapping fragments are retained as zero-fragment peaks and
+reported explicitly rather than dropped or converted to missing values.
+
+Across bar, distribution, fragments-per-peak, TSS, and scatter panels, the
+target palette uses stable colors for IgG, CTCF, GATA1, and RUNX1, with
+deterministic fallback colors for other targets. Line plots use direct endpoint labels
+and distinct markers/dashes so the samples remain identifiable without color
+alone.
+
+The motif enrichment heatmap consumes complete AME output. It displays all
+cognate motifs detected by whole-token matching (for example, `GATA1::TAL1`
+and `TAL1::GATA1`) plus the 15 non-cognate motifs with the strongest adjusted
+p-values across the cohort. `GATA10` therefore does not match an expected
+`GATA1`. The separate `top_motifs.tsv` export remains capped at ten motifs per
+target.
+
+HTML tables and chart labels use three significant digits for compact
+presentation. Machine-readable TSV and JSON outputs retain full precision, so
+downstream calculations should consume those files rather than values copied
+from the HTML. Long supporting tables are collapsed by default.
+
+## Dashboard data-product schemas
+
+The dashboard machine-readable contract is schema version `1` and generator version `1.1.0`.
+This is the first released form of the contract. Consumers
+should check both values before interpreting fields. The HTML is a descriptive
+view of these products, not a machine interface.
+
+`qc_summary.tsv` has one row per derived sample, ordered by `sample_id`, with
+these stable columns in this exact order:
+
+```text
+sample_id, library_id, input_group, assay_target, is_control, control_id,
+expected_motif, total_read_pairs, assigned_read_pairs, ambiguous_read_pairs,
+unassigned_read_pairs, assigned_fraction, ambiguous_fraction,
+unassigned_fraction, sample_assigned_reads, sample_assignment_fraction,
+raw_total_reads, mapped_percent, properly_paired_percent, mapq_filtered_reads,
+mapq_filtered_fragments, mapq_filtered_fraction, markdup_examined_reads,
+duplicate_total, duplicate_percent, mitochondrial_percent,
+estimated_library_size, insert_size_total_pairs, insert_size_min,
+insert_size_q25, insert_size_mean, insert_size_median, insert_size_q75,
+insert_size_max, peak_count, total_covered_bases, total_fragments,
+fragments_in_peaks, frip, peak_width_min, peak_width_q25, peak_width_mean,
+peak_width_median, peak_width_q75, peak_width_max, tss_status,
+tss_enrichment, expected_motif_status, best_motif_id,
+best_adjusted_p_value, ame_status, warning_count
+```
+
+`top_motifs.tsv` contains at most ten rank-ordered AME rows per target and
+never contains IgG-control rows. Its stable columns are:
+
+```text
+sample_id, assay_target, expected_motif, rank, motif_id, motif_alt_id,
+adjusted_p_value, p_value, effect, positive_sequences
+```
+
+`tss_profiles.tsv` is the stable tidy profile export with columns
+`sample_id`, `position_bp`, `signal`. The native
+`qc/tss/<sample_id>/<sample_id>.tss_profile.tsv` is instead the pinned
+deepTools 3.5.5 `plotProfile --outFileNameData` table and should not be treated
+as the dashboard's stable consumer schema.
+
+`qc_summary.json` has exactly these top-level fields:
+`schema_version`, `generator_version`, `annotation_status`, `counts`,
+`availability`, `metric_definitions`, `samples`, and `warnings`. `counts`
+contains sample, target, control, and warning counts. `availability` summarizes
+the `demultiplex`, `library`, `insert_size`, `peak`, `peak_width`, `tss`,
+`motif`, and `ame` families. Each sample carries the same families with a
+status and reason; statuses are `computed`, `skipped`, `empty`, `missing`,
+`failed`, or `not_applicable`. Insert-size and peak-width distributions are
+full-resolution, unbinned arrays under the corresponding sample's `library`
+and `peak` objects. The target-only `fragments_per_peak_distribution` is a
+compact histogram under `peak`. Producer-specific columns are not added
+automatically to this versioned public object.
+
+TSV missing numeric values are empty fields, booleans are lowercase `true` or
+`false`, and finite numbers use locale-independent text. JSON missing values
+are `null`; an observed but header-only distribution is an empty array with an
+`empty` availability status. The HTML displays missing values as `NA`.
+Absence, intentional skips, empty analyses, and failed/partial artifacts
+therefore remain distinguishable from measured zero.
+
+### Direct Nextflow interface changes in the unreleased dashboard update
+
+The `QC` subworkflow now requires eleven inputs, in order:
+`filtered_bams`, `final_broad_peaks`, `coverage`, `library_metrics`,
+`demultiplex_metrics`, `fastqc_reports`, `motif_metrics`, `gtf`, `tss_bed`,
+`motif_ame_results`, and `motif_ame_statuses`. Direct importers of the previous
+nine-input subworkflow must provide the two AME channels; use empty channels
+when motif analysis is disabled.
+
+The `TSS_ENRICHMENT.out.profiles` tuple now contains seven values:
+`meta`, TSS BED, compressed matrix, matrix table, profile image, native
+deepTools profile table, and status table. Direct module consumers that
+destructure the earlier six-value tuple must insert the profile-table element
+before the status table.
 
 ## QC interpretation
 
@@ -402,16 +525,20 @@ biological contexts deliberately rather than ranking ratios alone.
   properly paired fragments from the filtered BAM overlapping at least one
   final (blacklist-filtered when applicable) broad peak. The denominator is
   all unique properly paired fragments in that filtered BAM. A fragment is
-  counted once even if both mates or multiple peaks overlap.
+  counted once even if both mates or multiple peaks overlap. The original FRiP
+  value remains at `qc/peaks/<sample_id>/<sample_id>.peak_qc.tsv`, in row
+  `frip`; the dashboard summary joins that source with the other QC products.
 - **Peak QC:** includes count, union-covered bases, width min/mean/median/max
   and quartiles, width histogram, MACS2 score/signal summaries, and
   fragment-per-peak counts. These describe the final broad peaks.
 - **TSS enrichment:** when `--tss_bed` or `--gtf` is supplied, deepTools builds
   a strand-aware matrix from 3 kb upstream to 3 kb downstream in 10-bp bins
-  and emits the matrix and aggregate profile. The current output records the
-  computed/skipped status and profile; it does not reduce that curve to a
-  single scalar TSS-enrichment score. Without annotation it records
+  and emits the matrix and aggregate profile. The dashboard's scalar TSS
+  enrichment is position 0 divided by the mean first/last 100 bp, and the full
+  curve is retained in `tss_profiles.tsv`. Without annotation it records
   `skipped_no_annotation`.
+
+IgG controls are visually separated from targets in the dashboard. Controls have no expected-motif result, because expected motifs apply only to target libraries. When optional outputs are unavailable, the dashboard presents NA warnings rather than zero so absence is not mistaken for a measured value. The dashboard is descriptive and applies no biological thresholds; establish project-specific interpretation before making biological classifications.
 
 These metrics are descriptive QC, not universal pass/fail thresholds. Compare
 targets with matched controls and comparable input groups, and establish

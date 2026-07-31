@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+### Added
+
+- Added a self-contained consolidated QC dashboard with joined per-sample TSV
+  and JSON summaries, a TSS scalar and profile export, and a top-ten AME motif
+  summary. These reports are descriptive data products and do not make
+  biological classifications.
+- Added schema-versioned, generator-versioned dashboard JSON with explicit
+  target/control counts, per-family availability, structured warnings, and
+  insert-size and peak-width distributions.
+- Added six sequencing and five peak small-multiple panels, shared 250-bp
+  distribution bins, a fragments-per-peak coverage ECDF, direct sample labels,
+  and a complete-AME motif enrichment heatmap that includes all cognate motifs
+  plus the 15 strongest non-cognate motifs.
+
+### Changed
+
+- Corrected native deepTools 3.5.5 profile parsing and made the offline fake
+  byte-compatible with the pinned producer format.
+- The `QC` subworkflow now accepts AME result and AME status channels as its
+  tenth and eleventh inputs. The `TSS_ENRICHMENT.out.profiles` tuple now emits
+  the native profile table as its sixth element and the status table as its
+  seventh. Direct Nextflow importers must update their calls/destructuring.
+- Dashboard TSV booleans now use lowercase machine values, optional-analysis
+  states distinguish skipped/empty/missing/failed results, and the five-file
+  direct-CLI output is published as a rollback-safe bundle.
+- The dashboard generator is now version `1.1.0`. HTML tables and chart labels
+  use three significant digits while TSV and JSON data products retain full
+  precision; long supporting tables are collapsed by default.
+
 ## 0.1.0 — 2026-07-23
 
 - Added strict CSV manifest validation and synchronized streaming I2

@@ -253,6 +253,7 @@ workflow MOTIFS {
     sequence_inputs = PREPARE_MOTIF_SEQUENCES.out.sequences
     sequence_windows = PREPARE_MOTIF_SEQUENCES.out.windows
     known_motifs = AME.out.results
+    known_motif_statuses = AME.out.status
     de_novo_motifs = STREME.out.results
     scans = FIMO.out.results
     expected_motif_qc = MOTIF_SUMMARY.out.qc
