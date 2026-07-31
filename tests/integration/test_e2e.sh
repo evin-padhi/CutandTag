@@ -79,13 +79,14 @@ checks = {
             main,
             re.S,
         ),
-    "QC call matches its eleven-input contract":
+    "QC call matches its twelve-input contract":
         re.search(
             r"QC\(\s*ALIGN_QC\.out\.filtered_bam,\s*"
             r"PEAKS\.out\.final_broad_peaks,\s*ALIGN_QC\.out\.coverage,\s*"
             r"ALIGN_QC\.out\.metrics,\s*DEMULTIPLEX\.out\.metrics,\s*"
             r"DEMULTIPLEX\.out\.fastqc,\s*motif_metrics_ch,\s*gtf_ch,\s*"
-            r"tss_bed_ch,\s*motif_ame_results_ch,\s*motif_ame_status_ch\s*\)",
+            r"enrichment_dashboard_files_ch,\s*tss_bed_ch,\s*"
+            r"motif_ame_results_ch,\s*motif_ame_status_ch\s*\)",
             main,
             re.S,
         ),
@@ -143,6 +144,10 @@ checks = {
             "motif_metrics_ch",
             "metrics = all_metrics_ch",
         )),
+    "optional enrichment dashboard wiring stays empty-safe by default":
+        "enrichment_dashboard_files_ch = Channel.empty()" in main
+        and "ENRICHMENT.out.results.mix(" in main
+        and "completion_summary_enrichment = QC.out.enrichment_table" in main,
     "pipeline info retains validated parameters and a completion summary":
         all(token in main for token in (
             "validated_parameters.json",
@@ -431,6 +436,19 @@ with (
         for row in csv.DictReader(handle, delimiter="\t")
     }
 assert motif_metrics["status"] == "pass"
+
+run_summary = {
+    row["metric"]: row["value"]
+    for row in csv.DictReader(
+        (results / "pipeline_info/run_summary.txt").open(
+            newline="", encoding="utf-8"
+        ),
+        delimiter="\t",
+        fieldnames=["metric", "value"],
+    )
+}
+assert "peak_enrichment" not in run_summary
+assert not (results / "reports/summary/peak_enrichment.tsv").exists()
 
 with (results / "reports/qc_dashboard/qc_summary.tsv").open(
     newline="", encoding="utf-8"

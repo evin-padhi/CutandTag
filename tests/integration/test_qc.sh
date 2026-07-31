@@ -170,6 +170,7 @@ checks = {
             "stageAs: 'peak_qc??/*'",
             "stageAs: 'motif??/*'",
             "stageAs: 'tss??/*'",
+            "stageAs: 'enrichment??/*'",
         )),
     "custom report content covers demux, FRiP, peak count, motif, and library QC":
         all(token in multiqc for token in (
@@ -189,6 +190,17 @@ checks = {
         "combined_target_qc.tsv" in multiqc
         and "peak_qc??/*" in multiqc
         and "duplicate peak-QC sample_id" in multiqc,
+    "MultiQC only surfaces enrichment rows with status ok and omits empty sections":
+        'row.get("status") == "ok"' in multiqc
+        and "nanocut_peak_enrichment_mqc.tsv" in multiqc
+        and "if enrichment_rows:" in multiqc,
+    "MultiQC keys enrichment rows by the full comparison and configures image sections":
+        '"comparison_id"' in multiqc
+        and 'f"{row[\'foreground_id\']}|{row[\'reference_id\']}|{row[\'background_model\']}"' in multiqc
+        and "duplicate enrichment comparison_id" in multiqc
+        and '"plot_type": "image"' in multiqc
+        and "ignore_images: false" in multiqc
+        and "_heatmap_mqc.png" in multiqc,
     "MultiQC retains HTML, data, custom content, and versions":
         "multiqc_report.html" in multiqc
         and "multiqc_data" in multiqc
@@ -276,6 +288,17 @@ checks = {
         "MOTIF_QC_CUSTOM(safe_motif_metrics)" in qc
         and "meta, motifTsv" in qc
         and "Task 10 contract: tuple(meta, expected_motif_qc_tsv)" in qc,
+    "QC forwards optional enrichment files without breaking the no-enrichment path":
+        "safe_enrichment_files = enrichment_files" in qc
+        and ".ifEmpty { ignored -> [] }" in qc
+        and re.search(
+            r"MULTIQC\(\s*fastqc_files,\s*demux_custom_files,\s*"
+            r"library_custom_files,\s*insert_size_files,\s*peak_qc_files,\s*"
+            r"motif_metric_files,\s*tss_status_files,\s*safe_enrichment_files,\s*"
+            r"annotation_status\s*\)",
+            qc,
+            re.DOTALL,
+        ),
     "QC emits target QC, combined summary, optional TSS, report, and versions":
         all(token in qc for token in (
             "target_qc =",
@@ -646,6 +669,79 @@ grep -F $'100\t2' \
 grep -F $'<run>\tnone\tskipped_no_annotation' \
   "$tmp_dir/aggregate/multiqc_custom_content/nanocut_tss_qc_mqc.tsv" \
   >/dev/null
+[[ ! -e "$tmp_dir/aggregate/peak_enrichment.tsv" ]]
+[[ ! -e "$tmp_dir/aggregate/multiqc_custom_content/nanocut_peak_enrichment_mqc.tsv" ]]
+[[ ! -e "$tmp_dir/aggregate/multiqc_custom_content/nanocut_peak_enrichment_overview_mqc.md" ]]
+
+mkdir -p "$tmp_dir/aggregate/enrichment01"
+cat > "$tmp_dir/aggregate/enrichment01/peak_enrichment.tsv" <<'EOF'
+foreground_id	foreground_tf	reference_id	reference_type	reference_tf	background_model	foreground_peak_count	reference_peak_count	observed_overlap_count	null_mean_overlap	null_sd_overlap	enrichment_ratio	empirical_p_value	permutations_requested	permutations_succeeded	seed	status
+fg_ctcf	CTCF	ref_prior	chipseq	CTCF	random	20	25	10	4.0	1.5	2.5	0.001	1000	1000	1729	ok
+fg_ctcf	CTCF	ref_prior	chipseq	CTCF	length_matched	20	25	10	5.0	1.0	2.0	0.010	1000	1000	1729	ok
+fg_ctcf	CTCF	ref_prior	chipseq	CTCF	gc_matched	20	25	10					1000	200	1729	insufficient_background
+EOF
+cat > "$tmp_dir/aggregate/enrichment01/matrix_random.tsv" <<'EOF'
+foreground_id	ref_prior
+fg_ctcf	2.5
+EOF
+cat > "$tmp_dir/aggregate/enrichment01/matrix_length_matched.tsv" <<'EOF'
+foreground_id	ref_prior
+fg_ctcf	3.3
+EOF
+cat > "$tmp_dir/aggregate/enrichment01/matrix_gc_matched.tsv" <<'EOF'
+foreground_id	ref_prior
+fg_ctcf	1.8
+EOF
+cat > "$tmp_dir/aggregate/enrichment01/matrix_length_gc_matched.tsv" <<'EOF'
+foreground_id	ref_prior
+fg_ctcf	2.1
+EOF
+for image_name in \
+  observed_vs_null.png \
+  matrix_random.png \
+  matrix_length_matched.png \
+  matrix_gc_matched.png \
+  matrix_length_gc_matched.png
+do
+  printf 'fake png\n' > "$tmp_dir/aggregate/enrichment01/$image_name"
+done
+(
+  cd "$tmp_dir/aggregate"
+  annotation_status=skipped_no_annotation \
+    python3 "$repo_root/.multiqc_aggregate.test.py"
+)
+python3 - "$tmp_dir/aggregate" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+custom = root / "multiqc_custom_content"
+with (custom / "nanocut_peak_enrichment_mqc.tsv").open(
+    newline="",
+    encoding="utf-8",
+) as handle:
+    rows = list(csv.DictReader(handle, delimiter="\t"))
+
+comparison_ids = [row["comparison_id"] for row in rows]
+assert comparison_ids == [
+    "fg_ctcf|ref_prior|random",
+    "fg_ctcf|ref_prior|length_matched",
+]
+assert len(comparison_ids) == len(set(comparison_ids))
+assert all(row["status"] == "ok" for row in rows)
+
+config = (root / "multiqc_config.yml").read_text(encoding="utf-8")
+assert "ignore_images: false" in config
+for model in ("random", "length_matched", "gc_matched", "length_gc_matched"):
+    image_name = f"nanocut_peak_enrichment_{model}_heatmap_mqc.png"
+    assert (custom / image_name).is_file()
+    assert image_name in config
+    assert 'plot_type: "image"' in config
+PY
+grep -F 'Nano-CUT&Tag peak enrichment' \
+  "$tmp_dir/aggregate/multiqc_custom_content/nanocut_peak_enrichment_overview_mqc.md" >/dev/null
+rm -rf "$tmp_dir/aggregate/enrichment01"
 
 mkdir -p "$tmp_dir/aggregate/motif02"
 cp "$tmp_dir/motif_formatter/TARGET.motif_qc.tsv" \
@@ -1077,6 +1173,7 @@ workflow {
         Channel.empty(),
         Channel.empty(),
         Channel.empty(),
+        Channel.empty(),
         Channel.empty()
     )
 }
@@ -1103,6 +1200,8 @@ EOF
 [[ ! -e "$tmp_dir/runtime/results/qc/peaks/IgG/IgG.peak_qc.json" ]]
 [[ -f "$tmp_dir/runtime/results/reports/summary/combined_target_qc.tsv" ]]
 [[ -f "$tmp_dir/runtime/results/reports/multiqc/multiqc_report.html" ]]
+[[ ! -e "$tmp_dir/runtime/results/reports/summary/peak_enrichment.tsv" ]]
+[[ ! -e "$tmp_dir/runtime/results/reports/multiqc/multiqc_custom_content/nanocut_peak_enrichment_mqc.tsv" ]]
 [[ $(grep -c 'BAM_TO_FRAGMENTS' "$tmp_dir/runtime/trace.txt") -eq 1 ]]
 [[ $(grep -c 'PEAK_QC' "$tmp_dir/runtime/trace.txt") -eq 1 ]]
 [[ $(grep -c 'FILTERED_BAM_QC' "$tmp_dir/runtime/trace.txt") -eq 2 ]]

@@ -15,6 +15,8 @@ check_environment() {
   local file=$1
   local package=$2
   local version=$3
+  shift 3
+  local expected_dependencies=("${package}=${version}" "$@")
   local path="envs/$file"
 
   if [[ ! -f "$path" ]]; then
@@ -45,12 +47,12 @@ check_environment() {
       print
     }
   ' "$path")
-  if [[ ${#dependencies[@]} -ne 1 || ${dependencies[0]} != "${package}=${version}" ]]; then
-    fail "$path must contain only the direct dependency ${package}=${version}"
+  if [[ "${dependencies[*]}" != "${expected_dependencies[*]}" ]]; then
+    fail "$path must contain exactly these direct dependencies: ${expected_dependencies[*]}"
   fi
 }
 
-check_environment python.yml python 3.12.3
+check_environment python.yml python 3.12.3 matplotlib=3.9.2
 check_environment fastqc.yml fastqc 0.12.1
 check_environment bowtie2.yml bowtie2 2.5.4
 check_environment samtools.yml samtools 1.20

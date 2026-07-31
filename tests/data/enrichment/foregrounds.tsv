@@ -1,0 +1,3 @@
+foreground_id	foreground_tf	peak_file
+fg_ctcf	CTCF	ctcf.bed
+fg_runx1	RUNX1	runx1.bed

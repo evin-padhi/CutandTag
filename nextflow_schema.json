@@ -46,6 +46,11 @@
       "format": "file-path",
       "description": "Optional MEME-format motif database enabling motif analysis."
     },
+    "chipseq_input": {
+      "type": "string",
+      "format": "file-path",
+      "description": "Optional CSV manifest of external ChIP-seq reference peak sets used for peak-enrichment comparisons."
+    },
     "barcode_mismatches": {
       "type": "integer",
       "minimum": 0,
@@ -110,6 +115,24 @@
       "minimum": 1,
       "default": 200,
       "description": "Total width in base pairs of the reference-bounded motif sequence window."
+    },
+    "enrichment_permutations": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1000,
+      "description": "Number of null permutations requested per foreground/reference/background-model enrichment comparison."
+    },
+    "enrichment_seed": {
+      "type": "integer",
+      "default": 1729,
+      "description": "Deterministic seed for optional peak-enrichment comparisons."
+    },
+    "enrichment_gc_tolerance": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 1,
+      "default": 0.02,
+      "description": "Maximum absolute GC-fraction delta allowed for GC-matched enrichment background sampling."
     }
   },
   "required": ["input", "macs_genome_size"],

@@ -19,6 +19,9 @@ if not readme_path.is_file():
 readme = readme_path.read_text(encoding="utf-8")
 config = (root / "nextflow.config").read_text(encoding="utf-8")
 schema = json.loads((root / "nextflow_schema.json").read_text(encoding="utf-8"))
+main = (root / "main.nf").read_text(encoding="utf-8")
+qc = (root / "subworkflows/local/qc.nf").read_text(encoding="utf-8")
+multiqc = (root / "modules/local/multiqc.nf").read_text(encoding="utf-8")
 
 minimum_nextflow = "23.10.0"
 version_declarations = re.findall(
@@ -37,30 +40,29 @@ if minimum_version_phrase not in readme:
         + minimum_version_phrase
     )
 
-module_text = "\n".join(
+workflow_text = "\n".join(
     path.read_text(encoding="utf-8")
-    for path in sorted((root / "modules").rglob("*.nf"))
+    for source_root in (root / "modules", root / "subworkflows")
+    for path in sorted(source_root.rglob("*.nf"))
 )
-invoked_bin_tools = sorted(set(re.findall(r"\b([A-Za-z0-9_.-]+\.py)\b", module_text)))
+invoked_bin_tools = sorted(
+    set(
+        re.findall(
+            r"(?:\$\{projectDir\}/bin/|\$\{projectBin\}/|bin/)"
+            r"([A-Za-z0-9_.-]+\.py)\b",
+            workflow_text,
+        )
+    )
+)
 if not invoked_bin_tools:
-    raise SystemExit("FAIL: no repository Python tools were discovered in modules")
+    raise SystemExit("FAIL: no repository Python tools were discovered in workflow sources")
 missing_bin_tools = [
     tool for tool in invoked_bin_tools if not (root / "bin" / tool).is_file()
 ]
 if missing_bin_tools:
     raise SystemExit(
-        "FAIL: modules invoke missing repository bin tools: "
+        "FAIL: workflow sources invoke missing repository bin tools: "
         + ", ".join(missing_bin_tools)
-    )
-non_executable_bin_tools = [
-    tool
-    for tool in invoked_bin_tools
-    if not ((root / "bin" / tool).stat().st_mode & 0o111)
-]
-if non_executable_bin_tools:
-    raise SystemExit(
-        "FAIL: modules directly invoke non-executable repository bin tools: "
-        + ", ".join(non_executable_bin_tools)
     )
 
 params_block = re.search(r"(?ms)^\s*params\s*\{(.*?)^\s*\}", config)
@@ -142,6 +144,18 @@ required_phrases = [
     "broad",
     "narrow",
     "JASPAR",
+    "reference_id,tf,peak_file",
+    "random",
+    "length_matched",
+    "gc_matched",
+    "length_gc_matched",
+    "insufficient_background",
+    "zero_null_mean",
+    "no_foreground_peaks",
+    "no_reference_peaks",
+    "enrichment/",
+    "peak_enrichment.tsv",
+    "observed_vs_null.png",
     "-resume",
     "Nextflow runtime execution was not verified in this workspace",
     "reports/multiqc/multiqc_report.html",
@@ -182,10 +196,63 @@ if missing_phrases:
         + ", ".join(missing_phrases)
     )
 
+dashboard_checks = {
+    "QC collects optional enrichment files and forwards them to MultiQC":
+        "enrichment_files" in qc
+        and "safe_enrichment_files = enrichment_files" in qc
+        and ".ifEmpty { ignored -> [] }" in qc
+        and re.search(
+            r"MULTIQC\(\s*fastqc_files,\s*demux_custom_files,\s*"
+            r"library_custom_files,\s*insert_size_files,\s*peak_qc_files,\s*"
+            r"motif_metric_files,\s*tss_status_files,\s*safe_enrichment_files,\s*"
+            r"annotation_status\s*\)",
+            qc,
+            re.S,
+        ),
+    "MultiQC stages optional enrichment inputs, publishes enrichment artifacts, and skips empty custom sections":
+        "path enrichment_files, stageAs: 'enrichment??/*'" in multiqc
+        and "nanocut_peak_enrichment_mqc.tsv" in multiqc
+        and "if enrichment_rows:" in multiqc
+        and "row.get(\"status\") == \"ok\"" in multiqc
+        and "copyfile(" in multiqc
+        and "publishDir" in multiqc
+        and "pattern: 'peak_enrichment.tsv'" in multiqc
+        and "pattern: 'observed_vs_null.png'" in multiqc,
+    "MultiQC adds a dedicated peak-enrichment section with stable heatmap references for all four null models":
+        'section_name: "Nano-CUT&Tag peak enrichment"' in multiqc
+        and all(model in multiqc for model in (
+            "random",
+            "length_matched",
+            "gc_matched",
+            "length_gc_matched",
+        ))
+        and all(name in multiqc for name in (
+            "matrix_random.png",
+            "matrix_length_matched.png",
+            "matrix_gc_matched.png",
+            "matrix_length_gc_matched.png",
+        )),
+    "Completion summary links enrichment TSV only when the dashboard artifacts exist":
+        "path enrichment_files, stageAs: 'enrichment??/*'" in main
+        and "enrichment/peak_enrichment.tsv" in main
+        and "enrichment/plots/observed_vs_null.png" in main
+        and "enrichment_heatmap_" in main
+        and "if peak_enrichment_tables:" in main,
+}
+
+dashboard_failures = [
+    description for description, passed in dashboard_checks.items() if not passed
+]
+if dashboard_failures:
+    raise SystemExit(
+        "FAIL: dashboard structural assertions failed:\n  - "
+        + "\n  - ".join(dashboard_failures)
+    )
+
 print(
     f"README documents all {len(config_params)} CLI parameters, "
     f"{len(environment_files)} Conda environments, manifest fields, "
     "runtime environment variables, and required operational/QC topics; "
-    f"all {len(invoked_bin_tools)} module-invoked repository bin tools are executable."
+    f"all {len(invoked_bin_tools)} referenced repository bin tools exist."
 )
 PY

@@ -435,6 +435,22 @@ process MULTIQC {
         mode: 'copy',
         overwrite: true,
         pattern: 'combined_target_qc.tsv'
+    publishDir "${params.outdir}/reports/summary",
+        mode: 'copy',
+        overwrite: true,
+        pattern: 'peak_enrichment.tsv'
+    publishDir "${params.outdir}/reports/summary",
+        mode: 'copy',
+        overwrite: true,
+        pattern: 'matrix_*.tsv'
+    publishDir "${params.outdir}/reports/multiqc",
+        mode: 'copy',
+        overwrite: true,
+        pattern: 'observed_vs_null.png'
+    publishDir "${params.outdir}/reports/multiqc",
+        mode: 'copy',
+        overwrite: true,
+        pattern: 'matrix_*.png'
 
     input:
     path fastqc_files, stageAs: 'fastqc??/*'
@@ -444,10 +460,15 @@ process MULTIQC {
     path peak_qc_files, stageAs: 'peak_qc??/*'
     path motif_metric_files, stageAs: 'motif??/*'
     path tss_status_files, stageAs: 'tss??/*'
+    path enrichment_files, stageAs: 'enrichment??/*'
     val annotation_status
 
     output:
     path("combined_target_qc.tsv"), emit: combined_summary
+    path("peak_enrichment.tsv"), optional: true, emit: enrichment_table
+    path("matrix_*.tsv"), optional: true, emit: enrichment_matrices
+    path("observed_vs_null.png"), optional: true, emit: enrichment_plot
+    path("matrix_*.png"), optional: true, emit: enrichment_heatmaps
     path("multiqc_report.html"), emit: report
     path("multiqc_data"), emit: data
     path("multiqc_custom_content"), emit: custom_content
@@ -476,13 +497,16 @@ process MULTIQC {
 import csv
 import glob
 import os
+import shutil
 from pathlib import Path
 
 custom_dir = Path("multiqc_custom_content")
 
+
 def read_table(path):
     with open(path, encoding="utf-8", newline="") as handle:
         return list(csv.DictReader(handle, delimiter="\t"))
+
 
 def write_table(path, columns, rows):
     with open(path, "w", encoding="utf-8", newline="") as handle:
@@ -494,6 +518,7 @@ def write_table(path, columns, rows):
         )
         writer.writeheader()
         writer.writerows(rows)
+
 
 def combine_tables(pattern, identity):
     combined = []
@@ -508,6 +533,21 @@ def combine_tables(pattern, identity):
             seen.add(key)
             combined.append(row)
     return sorted(combined, key=lambda row: row[identity])
+
+
+def append_yaml_sections(handle, sections):
+    handle.write("custom_data:\n")
+    for key, metadata in sections:
+        handle.write(f"  {key}:\n")
+        for field, value in metadata.items():
+            escaped = value.replace('"', '\\"')
+            handle.write(f'    {field}: "{escaped}"\n')
+    handle.write("sp:\n")
+    for key, metadata in sections:
+        handle.write(f"  {key}:\n")
+        handle.write(f'    fn: "{metadata["filename"]}"\n')
+    handle.write("ignore_images: false\n")
+
 
 demux_columns = [
     "library_id",
@@ -689,54 +729,232 @@ write_table(
     ["sample_id", "annotation_mode", "status"],
     tss_rows,
 )
+
+enrichment_columns = [
+    "comparison_id",
+    "foreground_id",
+    "foreground_tf",
+    "reference_id",
+    "reference_type",
+    "reference_tf",
+    "background_model",
+    "foreground_peak_count",
+    "reference_peak_count",
+    "observed_overlap_count",
+    "null_mean_overlap",
+    "null_sd_overlap",
+    "enrichment_ratio",
+    "empirical_p_value",
+    "permutations_requested",
+    "permutations_succeeded",
+    "seed",
+    "status",
+]
+enrichment_rows = []
+seen_enrichment_comparisons = set()
+copied_enrichment = set()
+heatmap_models = [
+    (
+        "random",
+        "Fully random genomic intervals.",
+        "matrix_random.png",
+        "matrix_random.tsv",
+        "nanocut_peak_enrichment_random_heatmap_mqc.png",
+    ),
+    (
+        "length_matched",
+        "Random intervals matched only on peak length.",
+        "matrix_length_matched.png",
+        "matrix_length_matched.tsv",
+        "nanocut_peak_enrichment_length_matched_heatmap_mqc.png",
+    ),
+    (
+        "gc_matched",
+        "Random intervals matched only on GC content.",
+        "matrix_gc_matched.png",
+        "matrix_gc_matched.tsv",
+        "nanocut_peak_enrichment_gc_matched_heatmap_mqc.png",
+    ),
+    (
+        "length_gc_matched",
+        "Random intervals matched on both length and GC content.",
+        "matrix_length_gc_matched.png",
+        "matrix_length_gc_matched.tsv",
+        "nanocut_peak_enrichment_length_gc_matched_heatmap_mqc.png",
+    ),
+]
+
+
+def register_enrichment_file(path):
+    destination = Path(path.name)
+    if destination.name in copied_enrichment:
+        return
+    shutil.copyfile(path, destination)
+    copied_enrichment.add(destination.name)
+    if destination.name == "peak_enrichment.tsv":
+        for row in read_table(path):
+            if (
+                row.get("foreground_id")
+                and row.get("reference_id")
+                and row.get("background_model")
+                and row.get("status") == "ok"
+            ):
+                comparison_id = (
+                    f"{row['foreground_id']}|{row['reference_id']}|{row['background_model']}"
+                )
+                if comparison_id in seen_enrichment_comparisons:
+                    raise SystemExit(
+                        f"duplicate enrichment comparison_id: {comparison_id}"
+                    )
+                seen_enrichment_comparisons.add(comparison_id)
+                enrichment_rows.append({"comparison_id": comparison_id, **row})
+
+
+for path_text in sorted(glob.glob("enrichment*/*")):
+    path = Path(path_text)
+    if path.is_dir():
+        for nested in sorted(path.iterdir()):
+            if nested.is_file():
+                register_enrichment_file(nested)
+    elif path.is_file():
+        register_enrichment_file(path)
+
+if enrichment_rows:
+    for model, description, heatmap_png, matrix_tsv, heatmap_asset in heatmap_models:
+        heatmap_path = Path(heatmap_png)
+        matrix_path = Path(matrix_tsv)
+        if not heatmap_path.is_file() or not matrix_path.is_file():
+            raise SystemExit(
+                f"missing enrichment heatmap assets for {model}: "
+                f"{heatmap_png}, {matrix_tsv}"
+            )
+        shutil.copyfile(heatmap_path, custom_dir / heatmap_asset)
+    write_table(
+        custom_dir / "nanocut_peak_enrichment_mqc.tsv",
+        enrichment_columns,
+        enrichment_rows,
+    )
+    with open(
+        custom_dir / "nanocut_peak_enrichment_overview_mqc.md",
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        handle.write('id: "nanocut_peak_enrichment_overview"\n')
+        handle.write('section_name: "Nano-CUT&Tag peak enrichment"\n')
+        handle.write('description: "Peak-overlap enrichment against four null models."\n')
+        handle.write("---\n")
+        handle.write(
+            "Peak enrichment is reported in "
+            "[`peak_enrichment.tsv`](../summary/peak_enrichment.tsv) "
+            "with one row per foreground/reference/null-model comparison.\n\n"
+        )
+        handle.write(
+            "Null models and heatmaps:\n"
+        )
+        for model, description, heatmap_png, matrix_tsv, heatmap_asset in heatmap_models:
+            handle.write(
+                f"- `{model}` — {description} "
+                f"[heatmap]({heatmap_png}), "
+                f"[matrix](../summary/{matrix_tsv})\n"
+            )
+        handle.write(
+            "\nThe observed/null overview plot is available as "
+            "[`observed_vs_null.png`](observed_vs_null.png).\n"
+        )
+
+config_sections = [
+    (
+        "nanocut_demultiplex",
+        {
+            "section_name": "Nano-CUT&Tag demultiplexing",
+            "description": "Physical-library barcode assignment metrics.",
+            "plot_type": "table",
+            "file_format": "tsv",
+            "filename": "nanocut_demultiplex_mqc.tsv",
+        },
+    ),
+    (
+        "nanocut_library_qc",
+        {
+            "section_name": "Nano-CUT&Tag library QC",
+            "description": "Alignment, pairing, duplicate, mitochondrial, and complexity metrics.",
+            "plot_type": "table",
+            "file_format": "tsv",
+            "filename": "nanocut_library_qc_mqc.tsv",
+        },
+    ),
+    (
+        "nanocut_insert_size",
+        {
+            "section_name": "Nano-CUT&Tag insert-size distribution",
+            "description": "Paired-fragment insert-size counts from SAMtools stats.",
+            "plot_type": "linegraph",
+            "file_format": "tsv",
+            "filename": "nanocut_insert_size_mqc.tsv",
+        },
+    ),
+    (
+        "nanocut_peak_qc",
+        {
+            "section_name": "Nano-CUT&Tag broad-peak QC",
+            "description": "Final broad-peak counts and fragment-based FRiP.",
+            "plot_type": "table",
+            "file_format": "tsv",
+            "filename": "nanocut_peak_qc_mqc.tsv",
+        },
+    ),
+    (
+        "nanocut_motif_qc",
+        {
+            "section_name": "Nano-CUT&Tag expected motif QC",
+            "description": "Expected-motif status; not_run is retained until motif results are supplied.",
+            "plot_type": "table",
+            "file_format": "tsv",
+            "filename": "nanocut_motif_qc_mqc.tsv",
+        },
+    ),
+    (
+        "nanocut_tss_qc",
+        {
+            "section_name": "Nano-CUT&Tag TSS enrichment",
+            "description": "Optional strand-aware TSS enrichment status.",
+            "plot_type": "table",
+            "file_format": "tsv",
+            "filename": "nanocut_tss_qc_mqc.tsv",
+        },
+    ),
+]
+if enrichment_rows:
+    config_sections.append(
+        (
+            "nanocut_peak_enrichment",
+            {
+                "section_name": "Nano-CUT&Tag peak enrichment",
+                "description": "Foreground/reference overlap enrichment across the random, length_matched, gc_matched, and length_gc_matched null models.",
+                "plot_type": "table",
+                "file_format": "tsv",
+                "filename": "nanocut_peak_enrichment_mqc.tsv",
+            },
+        )
+    )
+    for model, description, heatmap_png, matrix_tsv, heatmap_asset in heatmap_models:
+        config_sections.append(
+            (
+                f"nanocut_peak_enrichment_{model}_heatmap",
+                {
+                    "section_name": f"Peak enrichment heatmap: {model}",
+                    "description": description,
+                    "plot_type": "image",
+                    "file_format": "png",
+                    "filename": heatmap_asset,
+                },
+            )
+        )
+
+with open("multiqc_config.yml", "w", encoding="utf-8") as handle:
+    append_yaml_sections(handle, config_sections)
 PY
 
-    cat > "multiqc_config.yml" <<'YAML'
-custom_data:
-  nanocut_demultiplex:
-    section_name: "Nano-CUT&Tag demultiplexing"
-    description: "Physical-library barcode assignment metrics."
-    plot_type: "table"
-    file_format: "tsv"
-  nanocut_library_qc:
-    section_name: "Nano-CUT&Tag library QC"
-    description: "Alignment, pairing, duplicate, mitochondrial, and complexity metrics."
-    plot_type: "table"
-    file_format: "tsv"
-  nanocut_insert_size:
-    section_name: "Nano-CUT&Tag insert-size distribution"
-    description: "Paired-fragment insert-size counts from SAMtools stats."
-    plot_type: "linegraph"
-    file_format: "tsv"
-  nanocut_peak_qc:
-    section_name: "Nano-CUT&Tag broad-peak QC"
-    description: "Final broad-peak counts and fragment-based FRiP."
-    plot_type: "table"
-    file_format: "tsv"
-  nanocut_motif_qc:
-    section_name: "Nano-CUT&Tag expected motif QC"
-    description: "Expected-motif status; not_run is retained until motif results are supplied."
-    plot_type: "table"
-    file_format: "tsv"
-  nanocut_tss_qc:
-    section_name: "Nano-CUT&Tag TSS enrichment"
-    description: "Optional strand-aware TSS enrichment status."
-    plot_type: "table"
-    file_format: "tsv"
-sp:
-  nanocut_demultiplex:
-    fn: "nanocut_demultiplex_mqc.tsv"
-  nanocut_library_qc:
-    fn: "nanocut_library_qc_mqc.tsv"
-  nanocut_insert_size:
-    fn: "nanocut_insert_size_mqc.tsv"
-  nanocut_peak_qc:
-    fn: "nanocut_peak_qc_mqc.tsv"
-  nanocut_motif_qc:
-    fn: "nanocut_motif_qc_mqc.tsv"
-  nanocut_tss_qc:
-    fn: "nanocut_tss_qc_mqc.tsv"
-YAML
     cp "multiqc_config.yml" "multiqc_custom_content/multiqc_config.yml"
 
     multiqc \

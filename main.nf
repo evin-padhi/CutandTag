@@ -4,8 +4,8 @@ include { DEMULTIPLEX } from './subworkflows/local/demultiplex'
 include { ALIGN_QC } from './subworkflows/local/align_qc'
 include { PEAKS } from './subworkflows/local/peaks'
 include { MOTIFS } from './subworkflows/local/motifs'
+include { ENRICHMENT } from './subworkflows/local/enrichment'
 include { QC } from './subworkflows/local/qc'
-
 
 def parameterText(rawValue, label, required = true) {
     def text = rawValue == null ? null : rawValue.toString().trim()
@@ -103,6 +103,118 @@ def validateFasta(rawValue, launchBase) {
 }
 
 
+def resolveManifestPath(value, manifestPathText, rowNumber, column, label) {
+    def manifestPath = java.nio.file.Paths.get(manifestPathText)
+    java.nio.file.Path candidate = java.nio.file.Paths.get(value)
+    if (!candidate.isAbsolute()) {
+        candidate = manifestPath.parent.resolve(candidate)
+    }
+    candidate = candidate.normalize().toAbsolutePath()
+    if (
+        !java.nio.file.Files.isRegularFile(candidate) ||
+        !java.nio.file.Files.isReadable(candidate)
+    ) {
+        throw new IllegalArgumentException(
+            "${label} row ${rowNumber} ${column} is not a readable regular file: ${candidate}"
+        )
+    }
+    candidate
+}
+
+
+def validateChipseqManifestAtLaunch(
+    rawValue,
+    fastaPathText,
+    launchBase,
+    projectRoot
+) {
+    def manifestPathText = validateRegularFile(
+        rawValue,
+        '--chipseq_input',
+        launchBase,
+        false
+    )
+    if (manifestPathText == null) {
+        return null
+    }
+    if (!manifestPathText.toLowerCase().endsWith('.csv')) {
+        throw new IllegalArgumentException(
+            "--chipseq_input must be a CSV manifest: ${manifestPathText}"
+        )
+    }
+    if (fastaPathText == null) {
+        throw new IllegalArgumentException(
+            "peak enrichment requires --fasta when --chipseq_input is supplied"
+        )
+    }
+
+    def validationScript = java.nio.file.Paths.get(projectRoot.toString())
+        .resolve('bin/peak_enrichment.py')
+        .normalize()
+        .toAbsolutePath()
+    if (!java.nio.file.Files.isRegularFile(validationScript)) {
+        throw new IllegalArgumentException(
+            "missing ChIP-seq validation utility: ${validationScript}"
+        )
+    }
+    def command = [
+        'python3',
+        validationScript.toString(),
+        'validate-chipseq-manifest',
+        '--manifest',
+        manifestPathText,
+        '--fasta',
+        fastaPathText,
+    ]
+    def validator
+    try {
+        validator = new ProcessBuilder(command)
+            .redirectErrorStream(true)
+            .start()
+    } catch (java.io.IOException error) {
+        throw new IllegalArgumentException(
+            "python3 is required for ChIP-seq manifest launch validation",
+            error
+        )
+    }
+    def validationOutput = validator.inputStream.getText('UTF-8').trim()
+    def validationStatus = validator.waitFor()
+    if (validationStatus != 0) {
+        throw new IllegalArgumentException(
+            validationOutput ?: "ChIP-seq manifest validation failed"
+        )
+    }
+    manifestPathText
+}
+
+
+def chipseqReferenceEntry(row, manifestPathText) {
+    def referenceId = row.reference_id?.toString()?.trim()
+    def tf = row.tf?.toString()?.trim()
+    def peakFile = row.peak_file?.toString()?.trim()
+    if (referenceId == null || tf == null || peakFile == null) {
+        throw new IllegalArgumentException(
+            "--chipseq_input rows require reference_id, tf, and peak_file"
+        )
+    }
+    def peakPath = resolveManifestPath(
+        peakFile,
+        manifestPathText,
+        'parsed',
+        'peak_file',
+        '--chipseq_input'
+    )
+    tuple(
+        [
+            reference_id: referenceId,
+            tf: tf,
+            reference_type: 'chipseq',
+        ],
+        peakPath
+    )
+}
+
+
 def validateMemeDatabase(rawValue, launchBase) {
     def motifDb = validateRegularFile(
         rawValue,
@@ -173,6 +285,42 @@ def validatePositiveInteger(rawValue, label) {
 }
 
 
+def validateInteger(rawValue, label) {
+    def text = parameterText(rawValue, label)
+    if (!(text ==~ /-?[0-9]+/)) {
+        throw new IllegalArgumentException(
+            "${label} must be an integer, got ${text}"
+        )
+    }
+    def value = new BigInteger(text)
+    if (value < Integer.MIN_VALUE || value > Integer.MAX_VALUE) {
+        throw new IllegalArgumentException(
+            "${label} is outside the supported integer range: ${text}"
+        )
+    }
+    value.intValue()
+}
+
+
+def validateUnitInterval(rawValue, label) {
+    def text = parameterText(rawValue, label)
+    def value
+    try {
+        value = new BigDecimal(text)
+    } catch (NumberFormatException error) {
+        throw new IllegalArgumentException(
+            "${label} must be a number in the interval (0, 1], got ${text}"
+        )
+    }
+    if (value <= BigDecimal.ZERO || value > BigDecimal.ONE) {
+        throw new IllegalArgumentException(
+            "${label} must be a number in the interval (0, 1], got ${text}"
+        )
+    }
+    value.doubleValue()
+}
+
+
 def validateMapq(rawValue) {
     def value = validateNonNegativeInteger(rawValue, '--min_mapq')
     if (value > 255) {
@@ -239,7 +387,7 @@ def validateOutputDirectory(rawValue, launchBase) {
 }
 
 
-def validatePipelineParameters(rawParams, launchBase) {
+def validatePipelineParameters(rawParams, launchBase, projectRoot) {
     def validated = new LinkedHashMap()
     validated.input = validateRegularFile(
         rawParams.input,
@@ -289,6 +437,12 @@ def validatePipelineParameters(rawParams, launchBase) {
             "motif analysis requires --fasta when --motif_db is supplied"
         )
     }
+    validated.chipseq_input = validateChipseqManifestAtLaunch(
+        rawParams.chipseq_input,
+        validated.fasta,
+        launchBase,
+        projectRoot
+    )
     validated.outdir = validateOutputDirectory(rawParams.outdir, launchBase)
     validated.barcode_mismatches = validateNonNegativeInteger(
         rawParams.barcode_mismatches,
@@ -330,6 +484,25 @@ def validatePipelineParameters(rawParams, launchBase) {
         rawParams.motif_window,
         '--motif_window'
     )
+    validated.enrichment_permutations = rawParams.enrichment_permutations == null
+        ? 1000
+        : validatePositiveInteger(
+            rawParams.enrichment_permutations,
+            '--enrichment_permutations'
+        )
+    validated.enrichment_seed = rawParams.enrichment_seed == null
+        ? 1729
+        : validateInteger(
+            rawParams.enrichment_seed,
+            '--enrichment_seed'
+        )
+    validated.enrichment_gc_tolerance =
+        rawParams.enrichment_gc_tolerance == null
+            ? 0.02d
+            : validateUnitInterval(
+                rawParams.enrichment_gc_tolerance,
+                '--enrichment_gc_tolerance'
+            )
     validated
 }
 
@@ -440,6 +613,7 @@ process WRITE_COMPLETION_SUMMARY {
     input:
     path multiqc_report, stageAs: 'report/multiqc_report.html'
     path combined_summary, stageAs: 'report/combined_target_qc.tsv'
+    path enrichment_files, stageAs: 'enrichment??/*'
     path qc_dashboard, stageAs: 'report/qc_dashboard.html'
     path qc_summary, stageAs: 'report/qc_summary.tsv'
     path software_versions, stageAs: 'pipeline/software_versions.yml'
@@ -472,12 +646,51 @@ if not Path("report/qc_summary.tsv").stat().st_size:
     raise SystemExit("QC summary is empty")
 if not Path("pipeline/software_versions.yml").stat().st_size:
     raise SystemExit("software version manifest is empty")
+enrichment_tables = sorted(Path().glob("enrichment*/*"))
+peak_enrichment_tables = [
+    path for path in enrichment_tables if path.name == "peak_enrichment.tsv"
+]
+if len(peak_enrichment_tables) > 1:
+    raise SystemExit("expected at most one peak_enrichment.tsv in completion summary inputs")
+enrichment_by_name = {}
+for path in enrichment_tables:
+    if path.name in enrichment_by_name:
+        raise SystemExit(f"duplicate enrichment summary input: {path.name}")
+    enrichment_by_name[path.name] = path
 with open("run_summary.txt", "w", encoding="utf-8") as output:
     output.write("status\\tsucceeded\\n")
     output.write(f"target_count\\t{len(targets)}\\n")
     output.write(f"motif_enabled\\t{str(bool(parameters['motif_db'])).lower()}\\n")
     output.write("report\\treports/multiqc/multiqc_report.html\\n")
     output.write("target_summary\\treports/summary/combined_target_qc.tsv\\n")
+    if peak_enrichment_tables:
+        required_plots = [
+            "observed_vs_null.png",
+            "matrix_random.png",
+            "matrix_length_matched.png",
+            "matrix_gc_matched.png",
+            "matrix_length_gc_matched.png",
+        ]
+        missing_plots = [
+            name for name in required_plots if name not in enrichment_by_name
+        ]
+        if missing_plots:
+            raise SystemExit(
+                "missing enrichment plots for completion summary: "
+                + ", ".join(missing_plots)
+            )
+        output.write("peak_enrichment\\tenrichment/peak_enrichment.tsv\\n")
+        output.write("enrichment_plot\\tenrichment/plots/observed_vs_null.png\\n")
+        for model in (
+            "random",
+            "length_matched",
+            "gc_matched",
+            "length_gc_matched",
+        ):
+            output.write(
+                f"enrichment_heatmap_{model}\\t"
+                f"enrichment/plots/matrix_{model}.png\\n"
+            )
     output.write("qc_dashboard\\treports/qc_dashboard/qc_dashboard.html\\n")
     output.write("qc_summary\\treports/qc_dashboard/qc_summary.tsv\\n")
     output.write("versions\\tpipeline_info/software_versions.yml\\n")
@@ -488,7 +701,7 @@ PY
 
 workflow NANOCUT {
     main:
-    validated = validatePipelineParameters(params, launchDir)
+    validated = validatePipelineParameters(params, launchDir, projectDir)
     params.outdir = validated.outdir
 
     manifest_ch = Channel.fromPath(validated.input, checkIfExists: true)
@@ -503,6 +716,12 @@ workflow NANOCUT {
     narrow_peaks_ch = Channel.value(
         validated.motif_db != null && validated.motif_use_narrow_peaks
     )
+    enrichment_results_ch = Channel.empty()
+    enrichment_status_ch = Channel.empty()
+    enrichment_plots_ch = Channel.empty()
+    enrichment_dashboard_files_ch = Channel.empty()
+    enrichment_versions_ch = Channel.empty()
+    chipseq_reference_inputs_ch = Channel.empty()
 
     DEMULTIPLEX(
         manifest_ch,
@@ -555,6 +774,71 @@ workflow NANOCUT {
         motif_ame_status_ch = MOTIFS.out.known_motif_statuses
     }
 
+    if (validated.chipseq_input != null) {
+        chipseq_reference_inputs_ch = Channel
+            .fromPath(validated.chipseq_input, checkIfExists: true)
+            .splitCsv(header: true)
+            .map { row ->
+                chipseqReferenceEntry(row, validated.chipseq_input)
+            }
+            .collect(flat: false)
+            .map { entries ->
+                if (entries.isEmpty()) {
+                    throw new IllegalArgumentException(
+                        "--chipseq_input manifest contains no rows"
+                    )
+                }
+                def orderedEntries = entries.sort { left, right ->
+                    left[0].reference_id <=> right[0].reference_id
+                }
+                def referenceRows = orderedEntries.collect { entry ->
+                    entry[0]
+                }
+                def encodedRows = groovy.json.JsonOutput
+                    .toJson(referenceRows)
+                    .bytes
+                    .encodeBase64()
+                    .toString()
+                tuple(
+                    encodedRows,
+                    orderedEntries.collect { entry -> entry[1] }
+                )
+            }
+        enrichment_fasta_ch = Channel.fromPath(
+            validated.fasta,
+            checkIfExists: true
+        )
+        enrichment_blacklist_ch = optionalPathChannel(validated.blacklist)
+        enrichment_permutations_ch = Channel.value(
+            validated.enrichment_permutations
+        )
+        enrichment_seed_ch = Channel.value(validated.enrichment_seed)
+        enrichment_gc_tolerance_ch = Channel.value(
+            validated.enrichment_gc_tolerance
+        )
+        analysis_metadata_ch = PEAKS.out.final_broad_peaks.map {
+            meta, peaks -> meta
+        }
+
+        ENRICHMENT(
+            PEAKS.out.final_broad_peaks,
+            analysis_metadata_ch,
+            chipseq_reference_inputs_ch,
+            enrichment_fasta_ch,
+            enrichment_blacklist_ch,
+            enrichment_permutations_ch,
+            enrichment_seed_ch,
+            enrichment_gc_tolerance_ch
+        )
+        enrichment_results_ch = ENRICHMENT.out.results
+        enrichment_status_ch = ENRICHMENT.out.status
+        enrichment_plots_ch = ENRICHMENT.out.plots
+        enrichment_dashboard_files_ch = ENRICHMENT.out.results.mix(
+            ENRICHMENT.out.plots
+        )
+        enrichment_versions_ch = ENRICHMENT.out.versions
+    }
+
     QC(
         ALIGN_QC.out.filtered_bam,
         PEAKS.out.final_broad_peaks,
@@ -563,6 +847,7 @@ workflow NANOCUT {
         DEMULTIPLEX.out.metrics,
         DEMULTIPLEX.out.fastqc,
         motif_metrics_ch,
+        enrichment_dashboard_files_ch,
         gtf_ch,
         tss_bed_ch,
         motif_ame_results_ch,
@@ -581,6 +866,7 @@ workflow NANOCUT {
         ALIGN_QC.out.versions,
         PEAKS.out.versions,
         motif_versions_ch,
+        enrichment_versions_ch,
         QC.out.versions,
         WRITE_PIPELINE_PARAMETERS.out.versions
     )
@@ -588,10 +874,15 @@ workflow NANOCUT {
         versionPath(record)
     }.collect()
     COLLECT_VERSIONS(version_files_ch)
+    completion_summary_enrichment = QC.out.enrichment_table
+        .mix(QC.out.enrichment_plot, QC.out.enrichment_heatmaps)
+        .collect()
+        .ifEmpty { ignored -> [] }
 
     WRITE_COMPLETION_SUMMARY(
         QC.out.multiqc_report,
         QC.out.combined_summary,
+        completion_summary_enrichment,
         QC.out.qc_dashboard_report,
         QC.out.qc_summary_tsv,
         COLLECT_VERSIONS.out.versions,
@@ -614,6 +905,9 @@ workflow NANOCUT {
     coverage = ALIGN_QC.out.coverage
     final_broad_peaks = PEAKS.out.final_broad_peaks
     motif_metrics = motif_metrics_ch
+    enrichment_results = enrichment_results_ch
+    enrichment_status = enrichment_status_ch
+    enrichment_plots = enrichment_plots_ch
     target_qc = QC.out.target_qc
     combined_summary = QC.out.combined_summary
     multiqc_report = QC.out.multiqc_report

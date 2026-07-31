@@ -1,0 +1,3 @@
+reference_id,tf,peak_file
+ref_ctcf_prior,CTCF,ctcf.bed
+ref_runx1_prior,RUNX1,runx1.bed
