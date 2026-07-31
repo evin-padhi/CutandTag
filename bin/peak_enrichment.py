@@ -380,6 +380,7 @@ def _read_manifest_rows(
     path: str | Path,
     required_columns: Sequence[str],
     optional_columns: Sequence[str] = (),
+    allow_empty: bool = False,
 ) -> list[tuple[int, dict[str, str]]]:
     manifest_path = Path(path).resolve()
     if not manifest_path.is_file():
@@ -408,7 +409,7 @@ def _read_manifest_rows(
                     normalized[column] = (row.get(column) or "").strip()
             rows.append((row_number, normalized))
 
-    if not rows:
+    if not rows and not allow_empty:
         raise ValueError("manifest contains no rows")
     return rows
 
@@ -434,7 +435,11 @@ def _resolve_manifest_path(value: str, manifest_path: Path, row_number: int, col
 
 def load_foreground_manifest(path: str | Path, chrom_sizes: dict[str, int]) -> list[ForegroundRecord]:
     manifest_path = Path(path).resolve()
-    rows = _read_manifest_rows(manifest_path, ("foreground_id", "foreground_tf", "peak_file"))
+    rows = _read_manifest_rows(
+        manifest_path,
+        ("foreground_id", "foreground_tf", "peak_file"),
+        allow_empty=True,
+    )
     records: list[ForegroundRecord] = []
     seen_ids: set[str] = set()
 
@@ -605,6 +610,28 @@ def _write_observed_vs_null_plot(path: Path, rows: Sequence[dict[str, object]]) 
     pyplot.close(figure)
 
 
+def _status_only_rows_for_empty_foregrounds(
+    permutations: int,
+    seed: int | str,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for model in ("random", "length_matched", "gc_matched", "length_gc_matched"):
+        rows.append(
+            {
+                "foreground_id": "",
+                "foreground_tf": "",
+                "reference_id": "",
+                "reference_tf": "",
+                "background_model": model,
+                "seed": seed,
+                "status": "no_foreground_peaks",
+                "permutations_requested": permutations,
+                "permutations_succeeded": 0,
+            }
+        )
+    return rows
+
+
 def run_cli(
     foreground_manifest: str | Path,
     reference_manifest: str | Path,
@@ -634,6 +661,14 @@ def run_cli(
 
     outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
+
+    if not foreground_records:
+        _write_tsv(outdir_path / "peak_enrichment.tsv", ENRICHMENT_FIELDNAMES, [])
+        status_rows = _status_only_rows_for_empty_foregrounds(permutations, seed)
+        _write_tsv(outdir_path / "enrichment_status.tsv", STATUS_FIELDNAMES, status_rows)
+        _write_matrix_files([], outdir_path)
+        _write_observed_vs_null_plot(outdir_path / "observed_vs_null.png", [])
+        return []
 
     all_rows: list[dict[str, object]] = []
     for foreground in foreground_records:

@@ -7,6 +7,7 @@ include { MOTIFS } from './subworkflows/local/motifs'
 include { ENRICHMENT } from './subworkflows/local/enrichment'
 include { QC } from './subworkflows/local/qc'
 
+def CHIPSEQ_SAFE_ID = /[A-Za-z0-9][A-Za-z0-9._-]*/
 
 def parameterText(rawValue, label, required = true) {
     def text = rawValue == null ? null : rawValue.toString().trim()
@@ -101,6 +102,288 @@ def validateFasta(rawValue, launchBase) {
         )
     }
     fasta
+}
+
+
+def loadFastaChromSizes(fastaPathText) {
+    def fastaPath = java.nio.file.Paths.get(fastaPathText)
+    def chromSizes = new LinkedHashMap<String, Integer>()
+    def currentName = null
+    java.nio.file.Files.newBufferedReader(fastaPath).withCloseable { reader ->
+        reader.eachLine { rawLine ->
+            def line = rawLine.trim()
+            if (line.isEmpty()) {
+                return
+            }
+            if (line.startsWith('>')) {
+                def header = line.substring(1).trim()
+                def tokens = header.split(/\s+/)
+                currentName = tokens ? tokens[0] : null
+                if (currentName == null || currentName.isEmpty()) {
+                    throw new IllegalArgumentException(
+                        "FASTA record is missing a sequence name: ${fastaPath}"
+                    )
+                }
+                if (chromSizes.containsKey(currentName)) {
+                    throw new IllegalArgumentException(
+                        "FASTA contains duplicate sequence name ${currentName}: ${fastaPath}"
+                    )
+                }
+                chromSizes[currentName] = 0
+                return
+            }
+            if (currentName == null) {
+                throw new IllegalArgumentException(
+                    "FASTA sequence data appeared before the first header: ${fastaPath}"
+                )
+            }
+            chromSizes[currentName] = chromSizes[currentName] + line.length()
+        }
+    }
+    if (chromSizes.isEmpty()) {
+        throw new IllegalArgumentException(
+            "FASTA contains no records: ${fastaPath}"
+        )
+    }
+    chromSizes
+}
+
+
+def manifestFields(line, delimiter) {
+    line.split(java.util.regex.Pattern.quote(delimiter), -1).collect { value ->
+        def trimmed = value.trim()
+        if (
+            trimmed.length() >= 2 &&
+            trimmed.startsWith('"') &&
+            trimmed.endsWith('"')
+        ) {
+            trimmed.substring(1, trimmed.length() - 1)
+        } else {
+            trimmed
+        }
+    }
+}
+
+
+def readManifestRows(
+    manifestPathText,
+    label,
+    requiredColumns,
+    optionalColumns = [],
+    allowEmpty = false
+) {
+    def manifestPath = java.nio.file.Paths.get(manifestPathText)
+    def lines = java.nio.file.Files.readAllLines(manifestPath)
+    if (lines.isEmpty()) {
+        throw new IllegalArgumentException(
+            "${label} manifest contains no header: ${manifestPath}"
+        )
+    }
+
+    def headerIndex = lines.findIndexOf { line -> !line.trim().isEmpty() }
+    if (headerIndex < 0) {
+        throw new IllegalArgumentException(
+            "${label} manifest contains no header: ${manifestPath}"
+        )
+    }
+    def delimiter = lines[headerIndex].contains('\t') ? '\t' : ','
+    def headers = manifestFields(lines[headerIndex], delimiter)
+    def missingColumns = requiredColumns.findAll { column ->
+        !headers.contains(column)
+    }
+    if (missingColumns) {
+        throw new IllegalArgumentException(
+            "${label} manifest is missing required columns: " +
+            missingColumns.join(', ')
+        )
+    }
+
+    def rows = []
+    for (int index = headerIndex + 1; index < lines.size(); index++) {
+        def rawLine = lines[index]
+        if (rawLine.trim().isEmpty()) {
+            continue
+        }
+        def fields = manifestFields(rawLine, delimiter)
+        if (fields.size() != headers.size()) {
+            throw new IllegalArgumentException(
+                "${label} row ${index + 1} has ${fields.size()} columns, " +
+                "expected ${headers.size()}"
+            )
+        }
+        def rawRow = [:]
+        headers.eachWithIndex { header, columnIndex ->
+            rawRow[header] = fields[columnIndex]
+        }
+        def normalized = [:]
+        requiredColumns.each { column ->
+            def value = rawRow[column]?.toString()?.trim()
+            if (value == null || value.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "${label} row ${index + 1} has blank required value for ${column}"
+                )
+            }
+            normalized[column] = value
+        }
+        optionalColumns.each { column ->
+            if (headers.contains(column)) {
+                normalized[column] = rawRow[column]?.toString()?.trim() ?: ''
+            }
+        }
+        rows << [index + 1, normalized]
+    }
+
+    if (rows.isEmpty() && !allowEmpty) {
+        throw new IllegalArgumentException(
+            "${label} manifest contains no rows: ${manifestPath}"
+        )
+    }
+    rows
+}
+
+
+def resolveManifestPath(value, manifestPathText, rowNumber, column, label) {
+    def manifestPath = java.nio.file.Paths.get(manifestPathText)
+    java.nio.file.Path candidate = java.nio.file.Paths.get(value)
+    if (!candidate.isAbsolute()) {
+        candidate = manifestPath.parent.resolve(candidate)
+    }
+    candidate = candidate.normalize().toAbsolutePath()
+    if (
+        !java.nio.file.Files.isRegularFile(candidate) ||
+        !java.nio.file.Files.isReadable(candidate)
+    ) {
+        throw new IllegalArgumentException(
+            "${label} row ${rowNumber} ${column} is not a readable regular file: ${candidate}"
+        )
+    }
+    candidate
+}
+
+
+def validateBedIntervalsAgainstFasta(
+    peakPath,
+    chromSizes,
+    label
+) {
+    java.nio.file.Files.newBufferedReader(peakPath).withCloseable { reader ->
+        int lineNumber = 0
+        reader.eachLine { rawLine ->
+            lineNumber++
+            def line = rawLine.trim()
+            if (line.isEmpty() || line.startsWith('#')) {
+                return
+            }
+            def fields = rawLine.split('\t')
+            if (fields.size() < 3) {
+                throw new IllegalArgumentException(
+                    "${label} line ${lineNumber} must have at least three BED columns"
+                )
+            }
+            def chrom = fields[0]
+            if (!chromSizes.containsKey(chrom)) {
+                throw new IllegalArgumentException(
+                    "${label} line ${lineNumber} has unknown chromosome ${chrom}"
+                )
+            }
+            def start
+            def end
+            try {
+                start = Integer.parseInt(fields[1])
+                end = Integer.parseInt(fields[2])
+            } catch (NumberFormatException error) {
+                throw new IllegalArgumentException(
+                    "${label} line ${lineNumber} coordinates must be integers"
+                )
+            }
+            if (start < 0 || end < 0) {
+                throw new IllegalArgumentException(
+                    "${label} line ${lineNumber} coordinates must be non-negative"
+                )
+            }
+            if (start >= end) {
+                throw new IllegalArgumentException(
+                    "${label} line ${lineNumber} start must be less than end"
+                )
+            }
+            if (end > chromSizes[chrom]) {
+                throw new IllegalArgumentException(
+                    "${label} line ${lineNumber} end exceeds FASTA chromosome size for ${chrom}"
+                )
+            }
+        }
+    }
+}
+
+
+def validateChipseqManifestAtLaunch(rawValue, fastaPathText, launchBase) {
+    def manifestPathText = validateRegularFile(
+        rawValue,
+        '--chipseq_input',
+        launchBase,
+        false
+    )
+    if (manifestPathText == null) {
+        return null
+    }
+    if (!manifestPathText.toLowerCase().endsWith('.csv')) {
+        throw new IllegalArgumentException(
+            "--chipseq_input must be a CSV manifest: ${manifestPathText}"
+        )
+    }
+    if (fastaPathText == null) {
+        throw new IllegalArgumentException(
+            "peak enrichment requires --fasta when --chipseq_input is supplied"
+        )
+    }
+
+    def chromSizes = loadFastaChromSizes(fastaPathText)
+    def rows = readManifestRows(
+        manifestPathText,
+        '--chipseq_input',
+        ['reference_id', 'tf', 'peak_file'],
+        ['reference_type']
+    )
+    def seenIds = new LinkedHashSet<String>()
+    rows.each { rowNumber, row ->
+        def referenceId = row.reference_id.toString()
+        if (!referenceId.matches(CHIPSEQ_SAFE_ID)) {
+            throw new IllegalArgumentException(
+                "--chipseq_input row ${rowNumber} has invalid reference_id " +
+                "${referenceId.inspect()}; use only letters, digits, dot, " +
+                "underscore, or dash, and begin with a letter or digit"
+            )
+        }
+        if (!seenIds.add(referenceId)) {
+            throw new IllegalArgumentException(
+                "--chipseq_input row ${rowNumber} has duplicate reference_id " +
+                referenceId.inspect()
+            )
+        }
+        def referenceType = row.reference_type?.toString()?.trim()
+        if (referenceType == null || referenceType.isEmpty()) {
+            referenceType = 'chipseq'
+        }
+        if (!(referenceType in ['chipseq', 'called_tf'])) {
+            throw new IllegalArgumentException(
+                "--chipseq_input row ${rowNumber} has unsupported " +
+                "reference_type ${referenceType.inspect()}"
+            )
+        }
+        def peakPath = resolveManifestPath(
+            row.peak_file.toString(),
+            manifestPathText,
+            rowNumber,
+            'peak_file',
+            '--chipseq_input'
+        )
+        validateBedIntervalsAgainstFasta(
+            peakPath,
+            chromSizes,
+            "--chipseq_input row ${rowNumber} peak_file"
+        )
+    }
+    manifestPathText
 }
 
 
@@ -321,31 +604,16 @@ def validatePipelineParameters(rawParams, launchBase) {
         rawParams.motif_db,
         launchBase
     )
-    validated.chipseq_input = validateRegularFile(
-        rawParams.chipseq_input,
-        '--chipseq_input',
-        launchBase,
-        false
-    )
-    if (
-        validated.chipseq_input != null &&
-        !validated.chipseq_input.toLowerCase().endsWith('.csv')
-    ) {
-        throw new IllegalArgumentException(
-            "--chipseq_input must be a CSV manifest: " +
-            validated.chipseq_input
-        )
-    }
     if (validated.motif_db != null && validated.fasta == null) {
         throw new IllegalArgumentException(
             "motif analysis requires --fasta when --motif_db is supplied"
         )
     }
-    if (validated.chipseq_input != null && validated.fasta == null) {
-        throw new IllegalArgumentException(
-            "peak enrichment requires --fasta when --chipseq_input is supplied"
-        )
-    }
+    validated.chipseq_input = validateChipseqManifestAtLaunch(
+        rawParams.chipseq_input,
+        validated.fasta,
+        launchBase
+    )
     validated.outdir = validateOutputDirectory(rawParams.outdir, launchBase)
     validated.barcode_mismatches = validateNonNegativeInteger(
         rawParams.barcode_mismatches,

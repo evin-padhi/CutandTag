@@ -56,13 +56,18 @@ checks = {
             "--enrichment_gc_tolerance",
         ))
         and "parameter_map = new LinkedHashMap(validated)" in main,
+    "launch-time chipseq manifest validation is part of validatePipelineParameters":
+        "validateChipseqManifestAtLaunch" in main
+        and "loadFastaChromSizes" in main
+        and "validateBedIntervalsAgainstFasta" in main
+        and re.search(
+            r"validated\.chipseq_input\s*=\s*validateChipseqManifestAtLaunch\(",
+            main,
+        ),
     "peak enrichment requires FASTA only when chipseq_input is supplied":
         "chipseq_input" in main
-        and re.search(
-            r"validated\.chipseq_input\s*!=\s*null\s*&&\s*validated\.fasta\s*==\s*null",
-            main,
-        )
-        and "--chipseq_input is supplied" in main,
+        and "peak enrichment requires --fasta when --chipseq_input is supplied" in main
+        and "validateChipseqManifestAtLaunch" in main,
     "new runtime defaults are defined in the base config":
         all(token in base_config for token in (
             "chipseq_input            = null",
@@ -95,7 +100,8 @@ checks = {
         "process VALIDATE_CHIPSEQ_MANIFEST" in validate_chipseq
         and 'conda "${projectDir}/envs/python.yml"' in validate_chipseq
         and "peak_enrichment.py" in validate_chipseq
-        and "normalized_chipseq_manifest.tsv" in validate_chipseq,
+        and "normalized_chipseq_manifest.tsv" in validate_chipseq
+        and "csv.DictWriter" in validate_chipseq,
     "ENRICHMENT validates metadata and prepares normalized manifests":
         "workflow ENRICHMENT" in enrichment
         and "foreground_id" in enrichment
@@ -103,6 +109,10 @@ checks = {
         and "reference_type" in enrichment
         and "called_tf" in enrichment
         and "VALIDATE_CHIPSEQ_MANIFEST" in enrichment,
+    "ENRICHMENT has an explicit zero-foreground status-only branch":
+        "WRITE_EMPTY_ENRICHMENT_OUTPUTS" in enrichment
+        and "rows.isEmpty()" in enrichment
+        and 'foreground_manifest.tsv' in enrichment,
     "ENRICHMENT publishes results, status, plots, and versions":
         all(token in enrichment for token in (
             "emit:",
@@ -123,3 +133,43 @@ if failed:
         + "\n  - ".join(failed)
     )
 PY
+
+if ! command -v nextflow >/dev/null 2>&1; then
+  printf '%s\n' \
+    'SKIP: Nextflow runtime unavailable; static enrichment wiring checks passed, but launch-time malformed-manifest execution was not exercised.'
+  exit 0
+fi
+
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/nanocut-enrichment.XXXXXX")
+trap 'rm -rf -- "${tmp_dir:?}"' EXIT
+
+cat > "$tmp_dir/duplicate.bed" <<'EOF'
+chrMini	10	20
+EOF
+
+cat > "$tmp_dir/chipseq.csv" <<EOF
+reference_id,tf,peak_file
+dup,CTCF,$tmp_dir/duplicate.bed
+dup,RUNX1,$tmp_dir/duplicate.bed
+EOF
+
+set +e
+nextflow run main.nf -profile test -stub-run --chipseq_input "$tmp_dir/chipseq.csv" \
+  >"$tmp_dir/launch-validation.log" 2>&1
+status=$?
+set -e
+
+if [[ $status -eq 0 ]]; then
+  printf 'FAIL: malformed chipseq manifest unexpectedly passed launch-time validation\n' >&2
+  exit 1
+fi
+
+if ! grep -q 'duplicate reference_id' "$tmp_dir/launch-validation.log"; then
+  printf 'FAIL: malformed chipseq manifest did not report duplicate reference_id at launch time\n' >&2
+  exit 1
+fi
+
+if grep -q 'MACS2_BROAD\|DEMULTIPLEX\|executor >' "$tmp_dir/launch-validation.log"; then
+  printf 'FAIL: malformed chipseq manifest reached workflow scheduling before validation stopped the run\n' >&2
+  exit 1
+fi

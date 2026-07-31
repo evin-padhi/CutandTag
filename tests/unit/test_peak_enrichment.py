@@ -321,3 +321,65 @@ def test_cli_writes_all_four_matrices_plots_and_status_output(tmp_path):
     assert matrix_rows[0]["foreground_id"] == "fg_ctcf"
     assert "ref_ctcf_prior" in matrix_rows[0]
     assert "fg_ctcf" not in matrix_rows[0]
+
+
+def test_cli_emits_status_only_outputs_when_foreground_manifest_has_no_rows(tmp_path):
+    from peak_enrichment import main
+
+    outdir = tmp_path / "enrichment"
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\n" + ("ACGT" * 50) + "\n", encoding="utf-8")
+
+    foreground_manifest = tmp_path / "foregrounds.tsv"
+    foreground_manifest.write_text(
+        "foreground_id\tforeground_tf\tpeak_file\n",
+        encoding="utf-8",
+    )
+
+    reference_dir = tmp_path / "references"
+    reference_dir.mkdir()
+    (reference_dir / "ctcf_prior.bed").write_text(
+        "chr1\t12\t18\nchr1\t70\t80\n",
+        encoding="utf-8",
+    )
+    reference_manifest = tmp_path / "references.tsv"
+    reference_manifest.write_text(
+        "reference_id\ttf\treference_type\tpeak_file\n"
+        "ref_ctcf_prior\tCTCF\tchipseq\treferences/ctcf_prior.bed\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--foreground-manifest",
+            str(foreground_manifest),
+            "--reference-manifest",
+            str(reference_manifest),
+            "--fasta",
+            str(fasta),
+            "--outdir",
+            str(outdir),
+            "--permutations",
+            "8",
+            "--seed",
+            "1729",
+            "--gc-tolerance",
+            "0.02",
+        ]
+    )
+
+    assert exit_code == 0
+    assert _read_tsv(outdir / "peak_enrichment.tsv") == []
+    status_rows = _read_tsv(outdir / "enrichment_status.tsv")
+    assert len(status_rows) == 4
+    assert {row["status"] for row in status_rows} == {"no_foreground_peaks"}
+    assert {row["background_model"] for row in status_rows} == {
+        "random",
+        "length_matched",
+        "gc_matched",
+        "length_gc_matched",
+    }
+    for model in ("random", "length_matched", "gc_matched", "length_gc_matched"):
+        assert (outdir / f"matrix_{model}.tsv").exists()
+        assert (outdir / f"matrix_{model}.png").exists()
+    assert (outdir / "observed_vs_null.png").exists()

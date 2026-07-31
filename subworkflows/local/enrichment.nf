@@ -307,6 +307,81 @@ PY
     """
 }
 
+process WRITE_EMPTY_ENRICHMENT_OUTPUTS {
+    tag 'peak-enrichment-empty'
+    label 'process_light'
+
+    conda "${projectDir}/envs/python.yml"
+    container 'python:3.12.3-slim-bookworm'
+
+    publishDir "${params.outdir}/peak_enrichment",
+        mode: 'copy',
+        overwrite: true
+
+    input:
+    val foreground_rows
+    path external_manifest, stageAs: 'chipseq/validated.tsv'
+    path fasta, stageAs: 'reference.fa'
+    path blacklist_files, stageAs: 'blacklist/regions*.bed'
+    val permutations
+    val seed
+    val gc_tolerance
+
+    output:
+    path "peak_enrichment.tsv", emit: results
+    path "enrichment_status.tsv", emit: status
+    path "plots", emit: plots
+    path "empty_enrichment_versions.yml", emit: versions
+
+    script:
+    def safePermutations = validateWorkflowPositiveInteger(
+        permutations,
+        'enrichment permutations'
+    )
+    def safeSeed = validateWorkflowInteger(seed, 'enrichment seed')
+    def safeGcTolerance = validateWorkflowGcTolerance(gc_tolerance)
+    if (!(foreground_rows instanceof java.util.List) || !foreground_rows.isEmpty()) {
+        throw new IllegalArgumentException(
+            "WRITE_EMPTY_ENRICHMENT_OUTPUTS expects zero grouped foreground rows"
+        )
+    }
+    if (blacklist_files.size() > 1) {
+        throw new IllegalArgumentException(
+            "WRITE_EMPTY_ENRICHMENT_OUTPUTS accepts at most one blacklist, got ${blacklist_files.size()}"
+        )
+    }
+    def blacklistArg = blacklist_files
+        ? '--blacklist "blacklist/regions.bed"'
+        : ''
+    def projectBin = "${projectDir}/bin".toString()
+
+    """
+    set -euo pipefail
+    printf 'foreground_id\tforeground_tf\tpeak_file\n' \
+        > "foreground_manifest.tsv"
+
+    python "${projectBin}/peak_enrichment.py" \
+        --foreground-manifest "foreground_manifest.tsv" \
+        --reference-manifest "chipseq/validated.tsv" \
+        --fasta "reference.fa" \
+        --outdir "." \
+        --permutations "${safePermutations}" \
+        --seed "${safeSeed}" \
+        --gc-tolerance "${safeGcTolerance}" \
+        ${blacklistArg}
+
+    mkdir -p "plots"
+    mv "observed_vs_null.png" "plots/"
+    mv matrix_*.tsv matrix_*.png "plots/"
+
+    printf 'WRITE_EMPTY_ENRICHMENT_OUTPUTS:\\n  python: ' \
+        > "empty_enrichment_versions.yml"
+    python --version 2>&1 >> "empty_enrichment_versions.yml"
+    printf '  peak_enrichment.py: repository\\n' \
+        >> "empty_enrichment_versions.yml"
+    """
+}
+
 workflow ENRICHMENT {
     take:
     final_broad_peaks
@@ -385,11 +460,22 @@ workflow ENRICHMENT {
             ]
         }
         .collect(flat: false)
+        .filter { rows -> !rows.isEmpty() }
         .map { rows ->
             groovy.json.JsonOutput.toJson(rows).bytes
                 .encodeBase64()
                 .toString()
         }
+    empty_foreground_rows = merged_foregrounds_for_rows
+        .map { foreground_meta, peak_file ->
+            [
+                foreground_id: foreground_meta.foreground_id,
+                foreground_tf: foreground_meta.foreground_tf,
+                peak_file: "foregrounds/${peak_file.name}",
+            ]
+        }
+        .collect(flat: false)
+        .filter { rows -> rows.isEmpty() }
     foreground_peak_files = merged_foregrounds_for_paths
         .map { foreground_meta, peak_file -> peak_file }
         .collect(flat: false)
@@ -404,15 +490,34 @@ workflow ENRICHMENT {
         safe_seed,
         safe_gc_tolerance
     )
+    WRITE_EMPTY_ENRICHMENT_OUTPUTS(
+        empty_foreground_rows,
+        VALIDATE_CHIPSEQ_MANIFEST.out.normalized,
+        reusable_fasta,
+        reusable_blacklist,
+        safe_permutations,
+        safe_seed,
+        safe_gc_tolerance
+    )
 
     versions_ch = VALIDATE_CHIPSEQ_MANIFEST.out.versions.mix(
         MERGE_FOREGROUND_PEAKS.out.versions,
-        RUN_PEAK_ENRICHMENT.out.versions
+        RUN_PEAK_ENRICHMENT.out.versions,
+        WRITE_EMPTY_ENRICHMENT_OUTPUTS.out.versions
+    )
+    results_ch = RUN_PEAK_ENRICHMENT.out.results.mix(
+        WRITE_EMPTY_ENRICHMENT_OUTPUTS.out.results
+    )
+    status_ch = RUN_PEAK_ENRICHMENT.out.status.mix(
+        WRITE_EMPTY_ENRICHMENT_OUTPUTS.out.status
+    )
+    plots_ch = RUN_PEAK_ENRICHMENT.out.plots.mix(
+        WRITE_EMPTY_ENRICHMENT_OUTPUTS.out.plots
     )
 
     emit:
-    results = RUN_PEAK_ENRICHMENT.out.results
-    plots = RUN_PEAK_ENRICHMENT.out.plots
-    status = RUN_PEAK_ENRICHMENT.out.status
+    results = results_ch
+    plots = plots_ch
+    status = status_ch
     versions = versions_ch
 }
