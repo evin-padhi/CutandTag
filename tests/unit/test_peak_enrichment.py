@@ -88,6 +88,47 @@ def test_parse_intervals_rejects_unknown_chromosome(tmp_path):
         parse_intervals(peaks, {"chr1": 100})
 
 
+def test_load_fasta_chrom_sizes_streams_wrapped_records(tmp_path, monkeypatch):
+    from peak_enrichment import load_fasta_chrom_sizes
+
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(
+        ">chr1 first record\nACG\nTT\n\n>chr2\nA\nCCC\n",
+        encoding="utf-8",
+    )
+
+    def reject_full_file_read(*args, **kwargs):
+        raise AssertionError("chromosome-size loading must stream the FASTA")
+
+    monkeypatch.setattr(Path, "read_text", reject_full_file_read)
+
+    assert load_fasta_chrom_sizes(fasta) == {"chr1": 5, "chr2": 4}
+
+
+def test_load_fasta_chrom_sizes_rejects_duplicate_record_names(tmp_path):
+    from peak_enrichment import load_fasta_chrom_sizes
+
+    fasta = tmp_path / "duplicate.fa"
+    fasta.write_text(
+        ">chr1 first\nACGT\n>chr1 second\nTGCA\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate FASTA record name 'chr1'"):
+        load_fasta_chrom_sizes(fasta)
+
+
+@pytest.mark.parametrize("header", [">", ">   "])
+def test_load_fasta_chrom_sizes_rejects_empty_record_names(tmp_path, header):
+    from peak_enrichment import load_fasta_chrom_sizes
+
+    fasta = tmp_path / "empty-name.fa"
+    fasta.write_text(f"{header}\nACGT\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing a sequence name"):
+        load_fasta_chrom_sizes(fasta)
+
+
 def test_overlap_counts_each_foreground_interval_once():
     foreground = [Interval("chr1", 10, 20), Interval("chr1", 30, 40)]
     reference = [Interval("chr1", 15, 17), Interval("chr1", 16, 18)]
@@ -420,6 +461,46 @@ def test_public_chipseq_validation_parses_csv_and_forces_chipseq_type(
             "peak_file": str(peaks.resolve()),
         }
     ]
+
+
+def test_public_chipseq_validation_does_not_load_full_fasta_sequences(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import peak_enrichment
+
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\nACGT\nACGT\n", encoding="utf-8")
+    peaks = tmp_path / "reference.bed"
+    peaks.write_text("chr1\t1\t7\n", encoding="utf-8")
+    manifest = tmp_path / "chipseq.csv"
+    manifest.write_text(
+        "reference_id,tf,peak_file\npublic_ctcf,CTCF,reference.bed\n",
+        encoding="utf-8",
+    )
+
+    def reject_full_sequence_loading(*args, **kwargs):
+        raise AssertionError("preflight validation must use chromosome lengths only")
+
+    monkeypatch.setattr(
+        peak_enrichment,
+        "load_fasta_sequences",
+        reject_full_sequence_loading,
+    )
+
+    exit_code = peak_enrichment.main(
+        [
+            "validate-chipseq-manifest",
+            "--manifest",
+            str(manifest),
+            "--fasta",
+            str(fasta),
+        ]
+    )
+
+    assert exit_code == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_load_reference_manifest_rejects_duplicate_ids_and_invalid_peak_rows(tmp_path):

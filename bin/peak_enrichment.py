@@ -433,6 +433,36 @@ def load_fasta_sequences(path: str | Path) -> dict[str, str]:
     return {name: "".join(parts) for name, parts in sequences.items()}
 
 
+def load_fasta_chrom_sizes(path: str | Path) -> dict[str, int]:
+    chrom_sizes: dict[str, int] = {}
+    current_name: str | None = None
+    fasta_path = Path(path)
+    if not fasta_path.is_file():
+        raise ValueError(f"FASTA file does not exist: {fasta_path}")
+    with fasta_path.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                header = line[1:].strip()
+                if not header:
+                    raise ValueError("FASTA record is missing a sequence name")
+                current_name = header.split(maxsplit=1)[0]
+                if current_name in chrom_sizes:
+                    raise ValueError(
+                        f"duplicate FASTA record name {current_name!r}"
+                    )
+                chrom_sizes[current_name] = 0
+                continue
+            if current_name is None:
+                raise ValueError("FASTA sequence data appeared before the first header")
+            chrom_sizes[current_name] += len(line)
+    if not chrom_sizes:
+        raise ValueError("FASTA contains no records")
+    return chrom_sizes
+
+
 def _manifest_dialect(sample: str) -> csv.Dialect:
     try:
         return csv.Sniffer().sniff(sample, delimiters=",\t")
@@ -856,10 +886,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if arguments[:1] == ["validate-chipseq-manifest"]:
         args = build_validation_argument_parser().parse_args(arguments[1:])
         try:
-            fasta_sequences = load_fasta_sequences(args.fasta)
             records = load_public_chipseq_manifest(
                 args.manifest,
-                {chrom: len(sequence) for chrom, sequence in fasta_sequences.items()},
+                load_fasta_chrom_sizes(args.fasta),
             )
         except ValueError as error:
             print(str(error), file=sys.stderr)

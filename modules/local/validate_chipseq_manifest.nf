@@ -1,5 +1,5 @@
 process VALIDATE_CHIPSEQ_MANIFEST {
-    tag "${manifest.simpleName}"
+    tag 'chipseq-manifest'
     label 'process_light'
 
     conda "${projectDir}/envs/python.yml"
@@ -41,13 +41,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path("bin").resolve()))
 
-from peak_enrichment import load_fasta_sequences, load_public_chipseq_manifest
+from peak_enrichment import load_fasta_chrom_sizes, load_public_chipseq_manifest
 
-fasta_sequences = load_fasta_sequences("reference.fa")
-chrom_sizes = {
-    chrom: len(sequence)
-    for chrom, sequence in fasta_sequences.items()
-}
+chrom_sizes = load_fasta_chrom_sizes("reference.fa")
 rows = json.loads(Path("reference_rows.json").read_text(encoding="utf-8"))
 staged_peaks = sorted(Path().glob("incoming_reference*/*"))
 if len(rows) != len(staged_peaks):

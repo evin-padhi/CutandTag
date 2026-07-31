@@ -28,6 +28,7 @@ from pathlib import Path
 
 root = Path.cwd()
 main = (root / "main.nf").read_text(encoding="utf-8")
+peak_enrichment = (root / "bin/peak_enrichment.py").read_text(encoding="utf-8")
 base_config = (root / "nextflow.config").read_text(encoding="utf-8")
 test_config = (root / "conf/test.config").read_text(encoding="utf-8")
 schema = json.loads((root / "nextflow_schema.json").read_text(encoding="utf-8"))
@@ -105,6 +106,13 @@ checks = {
         and "peak_enrichment.py" in validate_chipseq
         and "normalized_chipseq_manifest.tsv" in validate_chipseq
         and "csv.DictWriter" in validate_chipseq,
+    "chipseq manifest validation tag does not reference the removed manifest input":
+        "tag 'chipseq-manifest'" in validate_chipseq
+        and "manifest.simpleName" not in validate_chipseq,
+    "launch and staged manifest validation use the streaming FASTA size loader":
+        "load_fasta_chrom_sizes(args.fasta)" in peak_enrichment
+        and "load_fasta_chrom_sizes" in validate_chipseq
+        and "load_fasta_sequences" not in validate_chipseq,
     "every external chipseq BED is a staged path dependency and emitted for enrichment":
         "path(reference_peak_files" in validate_chipseq
         and 'path "reference_peaks/*.bed", emit: peaks' in validate_chipseq

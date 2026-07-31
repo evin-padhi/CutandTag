@@ -18,9 +18,10 @@ mapping in `assets/samples.example.csv`.
 - The input manifest and readable R1, R2, and I2 FASTQs.
 - A MACS2 genome-size shortcut such as `hs`, or a positive effective genome
   size integer.
-- Python 3 on the launch host when `--chipseq_input` is used; it runs the
-  repository CSV/BED validator before workflow scheduling. Enrichment tasks
-  themselves still use the selected Conda or Docker profile.
+- Python 3.10 or newer on the launch host when `--chipseq_input` is used. Before
+  workflow scheduling, this preflight streams FASTA chromosome lengths and
+  runs the repository CSV/BED validator. Enrichment tasks themselves still use
+  the selected Conda or Docker profile.
 
 The `conda` profile is the most direct portable installation path. Nextflow
 automatically creates each process environment from the repository-local,
