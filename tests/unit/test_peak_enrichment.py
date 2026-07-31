@@ -32,8 +32,8 @@ def run_enrichment_fixture(tmp_path: Path) -> Path:
 
     reference_dir = tmp_path / "references"
     reference_dir.mkdir()
-    (reference_dir / "ctcf.bed").write_text("chr1\t10\t20\n", encoding="utf-8")
-    (reference_dir / "gata1.bed").write_text("chr1\t12\t18\nchr1\t70\t80\n", encoding="utf-8")
+    (reference_dir / "ctcf_called.bed").write_text("chr1\t10\t20\n", encoding="utf-8")
+    (reference_dir / "ctcf_prior.bed").write_text("chr1\t12\t18\nchr1\t70\t80\n", encoding="utf-8")
 
     foreground_manifest = tmp_path / "foregrounds.tsv"
     foreground_manifest.write_text(
@@ -44,8 +44,8 @@ def run_enrichment_fixture(tmp_path: Path) -> Path:
     reference_manifest = tmp_path / "references.tsv"
     reference_manifest.write_text(
         "reference_id\ttf\treference_type\tpeak_file\n"
-        "ref_ctcf\tCTCF\tcalled_tf\treferences/ctcf.bed\n"
-        "ref_gata1\tGATA1\tchipseq\treferences/gata1.bed\n",
+        "fg_ctcf\tCTCF\tcalled_tf\treferences/ctcf_called.bed\n"
+        "ref_ctcf_prior\tCTCF\tchipseq\treferences/ctcf_prior.bed\n",
         encoding="utf-8",
     )
 
@@ -265,6 +265,7 @@ def test_cli_resolves_chipseq_peak_paths_relative_to_manifest(tmp_path):
     references = load_reference_manifest(manifest, {"chr1": 100})
 
     assert references[0].peak_file == peaks.resolve()
+    assert references[0].reference_type == "chipseq"
 
 
 def test_load_reference_manifest_rejects_duplicate_ids_and_invalid_peak_rows(tmp_path):
@@ -308,7 +309,7 @@ def test_cli_writes_all_four_matrices_plots_and_status_output(tmp_path):
 
     rows = _read_tsv(outdir / "peak_enrichment.tsv")
     assert len(rows) == 4
-    assert {row["reference_id"] for row in rows} == {"ref_gata1"}
+    assert {row["reference_id"] for row in rows} == {"ref_ctcf_prior"}
     assert {row["background_model"] for row in rows} == {
         "random",
         "length_matched",
@@ -318,5 +319,5 @@ def test_cli_writes_all_four_matrices_plots_and_status_output(tmp_path):
 
     matrix_rows = _read_tsv(outdir / "matrix_random.tsv")
     assert matrix_rows[0]["foreground_id"] == "fg_ctcf"
-    assert "ref_gata1" in matrix_rows[0]
-    assert "ref_ctcf" not in matrix_rows[0]
+    assert "ref_ctcf_prior" in matrix_rows[0]
+    assert "fg_ctcf" not in matrix_rows[0]

@@ -68,6 +68,7 @@ class ForegroundRecord:
 class ReferenceRecord:
     reference_id: str
     tf: str
+    reference_type: str
     peak_file: Path
 
 
@@ -375,7 +376,11 @@ def _manifest_dialect(sample: str) -> csv.Dialect:
         return csv.excel_tab if "\t" in sample.partition("\n")[0] else csv.excel
 
 
-def _read_manifest_rows(path: str | Path, required_columns: Sequence[str]) -> list[tuple[int, dict[str, str]]]:
+def _read_manifest_rows(
+    path: str | Path,
+    required_columns: Sequence[str],
+    optional_columns: Sequence[str] = (),
+) -> list[tuple[int, dict[str, str]]]:
     manifest_path = Path(path).resolve()
     if not manifest_path.is_file():
         raise ValueError(f"manifest file does not exist: {manifest_path}")
@@ -398,6 +403,9 @@ def _read_manifest_rows(path: str | Path, required_columns: Sequence[str]) -> li
                 if not value:
                     raise ValueError(f"row {row_number}: blank required value for {column}")
                 normalized[column] = value
+            for column in optional_columns:
+                if column in fieldnames:
+                    normalized[column] = (row.get(column) or "").strip()
             rows.append((row_number, normalized))
 
     if not rows:
@@ -445,7 +453,11 @@ def load_foreground_manifest(path: str | Path, chrom_sizes: dict[str, int]) -> l
 
 def load_reference_manifest(path: str | Path, chrom_sizes: dict[str, int]) -> list[ReferenceRecord]:
     manifest_path = Path(path).resolve()
-    rows = _read_manifest_rows(manifest_path, ("reference_id", "tf", "peak_file"))
+    rows = _read_manifest_rows(
+        manifest_path,
+        ("reference_id", "tf", "peak_file"),
+        optional_columns=("reference_type",),
+    )
     records: list[ReferenceRecord] = []
     seen_ids: set[str] = set()
 
@@ -455,9 +467,14 @@ def load_reference_manifest(path: str | Path, chrom_sizes: dict[str, int]) -> li
         if reference_id in seen_ids:
             raise ValueError(f"row {row_number}: duplicate reference_id {reference_id!r}")
         seen_ids.add(reference_id)
+        reference_type = row.get("reference_type") or "chipseq"
+        if reference_type not in {"chipseq", "called_tf"}:
+            raise ValueError(
+                f"row {row_number}: unsupported reference_type {reference_type!r}"
+            )
         peak_file = _resolve_manifest_path(row["peak_file"], manifest_path, row_number, "peak_file")
         parse_intervals(peak_file, chrom_sizes)
-        records.append(ReferenceRecord(reference_id, row["tf"], peak_file))
+        records.append(ReferenceRecord(reference_id, row["tf"], reference_type, peak_file))
 
     return records
 
@@ -622,7 +639,10 @@ def run_cli(
     for foreground in foreground_records:
         foreground_intervals = parse_intervals(foreground.peak_file, chrom_sizes)
         for reference in reference_records:
-            if foreground.foreground_tf == reference.tf:
+            if (
+                reference.reference_type == "called_tf"
+                and reference.reference_id == foreground.foreground_id
+            ):
                 continue
             reference_intervals = parse_intervals(reference.peak_file, chrom_sizes)
             pair_seed = f"{seed}:{foreground.foreground_id}:{reference.reference_id}"
