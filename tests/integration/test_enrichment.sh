@@ -122,6 +122,10 @@ checks = {
         'f"{record.reference_id}.bed.gz"' in validate_chipseq
         and 'record.peak_file.name.lower().endswith(".gz")' in validate_chipseq
         and 'path "reference_peaks/*.bed*", emit: peaks' in validate_chipseq,
+    "external chipseq references ignore chromosomes absent from the FASTA":
+        "ignore_unknown_chromosomes=True" in peak_enrichment
+        and 'ignore_unknown_chromosomes=reference_type == "chipseq"' in peak_enrichment
+        and 'ignore_unknown_chromosomes=reference.reference_type == "chipseq"' in peak_enrichment,
     "normalized chipseq manifests contain only staged relative peak paths":
         '"peak_file": f"reference_peaks/{destination.name}"' in validate_chipseq
         and "str(record.peak_file)" not in validate_chipseq
