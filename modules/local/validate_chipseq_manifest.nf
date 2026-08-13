@@ -22,7 +22,7 @@ process VALIDATE_CHIPSEQ_MANIFEST {
 
     output:
     path "normalized_chipseq_manifest.tsv", emit: normalized
-    path "reference_peaks/*.bed", emit: peaks
+    path "reference_peaks/*.bed*", emit: peaks
     path "validate_chipseq_manifest_versions.yml", emit: versions
 
     script:
@@ -79,7 +79,12 @@ with open("normalized_chipseq_manifest.tsv", "w", encoding="utf-8", newline="") 
     )
     writer.writeheader()
     for record in records:
-        destination = output_dir / f"{record.reference_id}.bed"
+        destination_name = (
+            f"{record.reference_id}.bed.gz"
+            if record.peak_file.name.lower().endswith(".gz")
+            else f"{record.reference_id}.bed"
+        )
+        destination = output_dir / destination_name
         shutil.copyfile(record.peak_file, destination)
         writer.writerow(
             {

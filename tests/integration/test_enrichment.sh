@@ -115,9 +115,13 @@ checks = {
         and "load_fasta_sequences" not in validate_chipseq,
     "every external chipseq BED is a staged path dependency and emitted for enrichment":
         "path(reference_peak_files" in validate_chipseq
-        and 'path "reference_peaks/*.bed", emit: peaks' in validate_chipseq
+        and 'path "reference_peaks/*.bed*", emit: peaks' in validate_chipseq
         and enrichment.count("path external_peak_files") >= 2
         and "VALIDATE_CHIPSEQ_MANIFEST.out.peaks" in enrichment,
+    "gzip chipseq references retain their suffix after staging":
+        'f"{record.reference_id}.bed.gz"' in validate_chipseq
+        and 'record.peak_file.name.lower().endswith(".gz")' in validate_chipseq
+        and 'path "reference_peaks/*.bed*", emit: peaks' in validate_chipseq,
     "normalized chipseq manifests contain only staged relative peak paths":
         '"peak_file": f"reference_peaks/{destination.name}"' in validate_chipseq
         and "str(record.peak_file)" not in validate_chipseq
