@@ -238,12 +238,17 @@ process RUN_PEAK_ENRICHMENT {
     )
     def safeSeed = validateWorkflowInteger(seed, 'enrichment seed')
     def safeGcTolerance = validateWorkflowGcTolerance(gc_tolerance)
-    if (blacklist_files.size() > 1) {
+    def blacklistCount = blacklist_files == null
+        ? 0
+        : (blacklist_files instanceof java.util.Collection
+            ? blacklist_files.size()
+            : 1)
+    if (blacklistCount > 1) {
         throw new IllegalArgumentException(
-            "RUN_PEAK_ENRICHMENT accepts at most one blacklist, got ${blacklist_files.size()}"
+            "RUN_PEAK_ENRICHMENT accepts at most one blacklist, got ${blacklistCount}"
         )
     }
-    def blacklistArg = blacklist_files
+    def blacklistArg = blacklistCount > 0
         ? '--blacklist "blacklist/regions.bed"'
         : ''
     """
@@ -356,12 +361,17 @@ process WRITE_EMPTY_ENRICHMENT_OUTPUTS {
             "WRITE_EMPTY_ENRICHMENT_OUTPUTS expects zero grouped foreground rows"
         )
     }
-    if (blacklist_files.size() > 1) {
+    def blacklistCount = blacklist_files == null
+        ? 0
+        : (blacklist_files instanceof java.util.Collection
+            ? blacklist_files.size()
+            : 1)
+    if (blacklistCount > 1) {
         throw new IllegalArgumentException(
-            "WRITE_EMPTY_ENRICHMENT_OUTPUTS accepts at most one blacklist, got ${blacklist_files.size()}"
+            "WRITE_EMPTY_ENRICHMENT_OUTPUTS accepts at most one blacklist, got ${blacklistCount}"
         )
     }
-    def blacklistArg = blacklist_files
+    def blacklistArg = blacklistCount > 0
         ? '--blacklist "blacklist/regions.bed"'
         : ''
     """

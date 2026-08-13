@@ -131,6 +131,10 @@ checks = {
         and "matches(ENRICHMENT_SAFE_ID)" not in enrichment
         and enrichment.count("def safeIdPattern = /[A-Za-z0-9][A-Za-z0-9._-]*/") == 3
         and enrichment.count("matches(safeIdPattern)") == 3,
+    "blacklist count handles a single staged Path instead of its byte size":
+        enrichment.count("blacklist_files instanceof java.util.Collection") == 2
+        and enrichment.count("def blacklistCount = blacklist_files == null") == 2
+        and "blacklist_files.size() > 1" not in enrichment,
     "normalized chipseq manifests contain only staged relative peak paths":
         '"peak_file": f"reference_peaks/{destination.name}"' in validate_chipseq
         and "str(record.peak_file)" not in validate_chipseq
