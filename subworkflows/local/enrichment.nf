@@ -1,8 +1,7 @@
 include { VALIDATE_CHIPSEQ_MANIFEST } from '../../modules/local/validate_chipseq_manifest'
 
-def ENRICHMENT_SAFE_ID = /[A-Za-z0-9][A-Za-z0-9._-]*/
-
 def validateEnrichmentMeta(rawMeta, context) {
+    def safeIdPattern = /[A-Za-z0-9][A-Za-z0-9._-]*/
     if (!(rawMeta instanceof Map)) {
         throw new IllegalArgumentException(
             "${context} metadata must be a map"
@@ -10,9 +9,9 @@ def validateEnrichmentMeta(rawMeta, context) {
     }
     def meta = new LinkedHashMap(rawMeta)
     def sampleId = meta.sample_id?.toString()
-    if (sampleId == null || !sampleId.matches(ENRICHMENT_SAFE_ID)) {
+    if (sampleId == null || !sampleId.matches(safeIdPattern)) {
         throw new IllegalArgumentException(
-            "${context} sample_id must match ${ENRICHMENT_SAFE_ID}, got ${sampleId}"
+            "${context} sample_id must match ${safeIdPattern}, got ${sampleId}"
         )
     }
     if (!(meta.is_control instanceof Boolean)) {
@@ -46,6 +45,7 @@ def analysisBySampleId(rows) {
 }
 
 def enrichmentDescriptor(rawTf) {
+    def safeIdPattern = /[A-Za-z0-9][A-Za-z0-9._-]*/
     def tf = rawTf?.toString()?.trim()
     if (tf == null || tf.isEmpty()) {
         throw new IllegalArgumentException(
@@ -63,9 +63,9 @@ def enrichmentDescriptor(rawTf) {
         .toString()
         .take(12)
     def foregroundId = "called_tf_${token}_${foregroundHash}"
-    if (!foregroundId.matches(ENRICHMENT_SAFE_ID)) {
+    if (!foregroundId.matches(safeIdPattern)) {
         throw new IllegalArgumentException(
-            "foreground_id must match ${ENRICHMENT_SAFE_ID}, got ${foregroundId}"
+            "foreground_id must match ${safeIdPattern}, got ${foregroundId}"
         )
     }
     [
@@ -167,11 +167,12 @@ process MERGE_FOREGROUND_PEAKS {
         emit: versions
 
     script:
+    def safeIdPattern = /[A-Za-z0-9][A-Za-z0-9._-]*/
     def foregroundId = foreground_meta.foreground_id?.toString()
     def foregroundTf = foreground_meta.foreground_tf?.toString()
-    if (foregroundId == null || !foregroundId.matches(ENRICHMENT_SAFE_ID)) {
+    if (foregroundId == null || !foregroundId.matches(safeIdPattern)) {
         throw new IllegalArgumentException(
-            "foreground_id must match ${ENRICHMENT_SAFE_ID}, got ${foregroundId}"
+            "foreground_id must match ${safeIdPattern}, got ${foregroundId}"
         )
     }
     if (foregroundTf == null || foregroundTf.trim().isEmpty()) {
