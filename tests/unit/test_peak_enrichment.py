@@ -88,6 +88,16 @@ def test_parse_intervals_rejects_unknown_chromosome(tmp_path):
         parse_intervals(peaks, {"chr1": 100})
 
 
+def test_parse_intervals_reads_gzip_bed(tmp_path):
+    import gzip
+
+    peaks = tmp_path / "peaks.bed.gz"
+    with gzip.open(peaks, "wt", encoding="utf-8") as handle:
+        handle.write("chr1\t10\t20\tpeak-1\n")
+
+    assert parse_intervals(peaks, {"chr1": 100}) == [Interval("chr1", 10, 20)]
+
+
 def test_load_fasta_chrom_sizes_streams_wrapped_records(tmp_path, monkeypatch):
     from peak_enrichment import load_fasta_chrom_sizes
 

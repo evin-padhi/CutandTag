@@ -8,6 +8,7 @@ from bisect import bisect_left
 from collections import defaultdict
 import csv
 from dataclasses import dataclass
+import gzip
 import json
 from pathlib import Path
 import random
@@ -94,9 +95,16 @@ def _group_by_chrom(intervals: Iterable[Interval]) -> dict[str, list[Interval]]:
     return grouped
 
 
+def _open_peak_file(path: str | Path):
+    peak_path = Path(path)
+    if peak_path.suffix.lower() == ".gz":
+        return gzip.open(peak_path, "rt", encoding="utf-8")
+    return peak_path.open(encoding="utf-8")
+
+
 def parse_intervals(path: str | Path, chrom_sizes: dict[str, int]) -> list[Interval]:
     intervals: list[Interval] = []
-    with Path(path).open(encoding="utf-8") as handle:
+    with _open_peak_file(path) as handle:
         for line_number, raw_line in enumerate(handle, start=1):
             line = raw_line.strip()
             if not line or line.startswith("#"):
