@@ -88,6 +88,27 @@ def test_parse_intervals_rejects_unknown_chromosome(tmp_path):
         parse_intervals(peaks, {"chr1": 100})
 
 
+def test_public_chipseq_manifest_ignores_unknown_chromosomes(tmp_path):
+    from peak_enrichment import load_public_chipseq_manifest
+
+    peaks = tmp_path / "public.bed"
+    peaks.write_text(
+        "chr1\t10\t20\n"
+        "chr10_GL383546v1_alt\t30\t40\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "chipseq.csv"
+    manifest.write_text(
+        "reference_id,tf,peak_file\n"
+        "public_ctcf,CTCF,public.bed\n",
+        encoding="utf-8",
+    )
+
+    records = load_public_chipseq_manifest(manifest, {"chr1": 100})
+
+    assert records[0].reference_id == "public_ctcf"
+
+
 def test_parse_intervals_reads_gzip_bed(tmp_path):
     import gzip
 
@@ -530,8 +551,8 @@ def test_load_reference_manifest_rejects_duplicate_ids_and_invalid_peak_rows(tmp
     )
     invalid_peak_manifest = tmp_path / "invalid.tsv"
     invalid_peak_manifest.write_text(
-        "reference_id\ttf\tpeak_file\n"
-        "bad\tGATA1\tsecond.bed\n",
+        "reference_id\ttf\treference_type\tpeak_file\n"
+        "bad\tGATA1\tcalled_tf\tsecond.bed\n",
         encoding="utf-8",
     )
 

@@ -102,7 +102,12 @@ def _open_peak_file(path: str | Path):
     return peak_path.open(encoding="utf-8")
 
 
-def parse_intervals(path: str | Path, chrom_sizes: dict[str, int]) -> list[Interval]:
+def parse_intervals(
+    path: str | Path,
+    chrom_sizes: dict[str, int],
+    *,
+    ignore_unknown_chromosomes: bool = False,
+) -> list[Interval]:
     intervals: list[Interval] = []
     with _open_peak_file(path) as handle:
         for line_number, raw_line in enumerate(handle, start=1):
@@ -114,6 +119,8 @@ def parse_intervals(path: str | Path, chrom_sizes: dict[str, int]) -> list[Inter
                 raise ValueError(f"line {line_number}: expected at least three BED columns")
             chrom = fields[0]
             if chrom not in chrom_sizes:
+                if ignore_unknown_chromosomes:
+                    continue
                 raise ValueError(f"line {line_number}: unknown chromosome {chrom!r}")
             try:
                 start = int(fields[1])
@@ -580,7 +587,11 @@ def load_reference_manifest(path: str | Path, chrom_sizes: dict[str, int]) -> li
                 f"row {row_number}: unsupported reference_type {reference_type!r}"
             )
         peak_file = _resolve_manifest_path(row["peak_file"], manifest_path, row_number, "peak_file")
-        parse_intervals(peak_file, chrom_sizes)
+        parse_intervals(
+            peak_file,
+            chrom_sizes,
+            ignore_unknown_chromosomes=reference_type == "chipseq",
+        )
         records.append(ReferenceRecord(reference_id, row["tf"], reference_type, peak_file))
 
     return records
@@ -611,7 +622,11 @@ def load_public_chipseq_manifest(
             row_number,
             "peak_file",
         )
-        parse_intervals(peak_file, chrom_sizes)
+        parse_intervals(
+            peak_file,
+            chrom_sizes,
+            ignore_unknown_chromosomes=True,
+        )
         records.append(ReferenceRecord(reference_id, row["tf"], "chipseq", peak_file))
 
     return records
@@ -824,7 +839,11 @@ def run_cli(
                 and reference.reference_id == foreground.foreground_id
             ):
                 continue
-            reference_intervals = parse_intervals(reference.peak_file, chrom_sizes)
+            reference_intervals = parse_intervals(
+                reference.peak_file,
+                chrom_sizes,
+                ignore_unknown_chromosomes=reference.reference_type == "chipseq",
+            )
             pair_seed = f"{seed}:{foreground.foreground_id}:{reference.reference_id}"
             enrichment_rows = calculate_enrichment(
                 foreground_intervals,
