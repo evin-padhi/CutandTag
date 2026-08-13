@@ -126,6 +126,11 @@ checks = {
         "ignore_unknown_chromosomes=True" in peak_enrichment
         and 'ignore_unknown_chromosomes=reference_type == "chipseq"' in peak_enrichment
         and 'ignore_unknown_chromosomes=reference.reference_type == "chipseq"' in peak_enrichment,
+    "enrichment safe-ID regex is local to every Nextflow scope":
+        "def ENRICHMENT_SAFE_ID" not in enrichment
+        and "matches(ENRICHMENT_SAFE_ID)" not in enrichment
+        and enrichment.count("def safeIdPattern = /[A-Za-z0-9][A-Za-z0-9._-]*/") == 3
+        and enrichment.count("matches(safeIdPattern)") == 3,
     "normalized chipseq manifests contain only staged relative peak paths":
         '"peak_file": f"reference_peaks/{destination.name}"' in validate_chipseq
         and "str(record.peak_file)" not in validate_chipseq
