@@ -4,8 +4,10 @@ This Nextflow DSL2 workflow demultiplexes paired-end bulk nano-CUT&Tag reads
 with an 8-base I2 barcode, aligns each derived sample, calls matched-IgG
 NanoScope-compatible broad peaks, calculates library/peak QC, and optionally
 tests expected and de novo motifs or peak-overlap enrichment against public
-ChIP-seq references. The repository includes the exact six-library manifest
-mapping in `assets/samples.example.csv`.
+ChIP-seq references. It also creates assay-specific consensus peak intervals
+and a paired-end fragment count matrix for downstream differential-binding
+analysis. The repository includes the exact six-library manifest mapping in
+`assets/samples.example.csv`.
 
 ## Prerequisites
 
@@ -48,6 +50,7 @@ The canonical environments are:
 | `envs/deeptools.yml` | deepTools 3.5.5 | RPKM bigWig and optional TSS enrichment |
 | `envs/macs2.yml` | MACS2 2.2.9.1 | Broad primary and narrow motif-only peak calls |
 | `envs/bedtools.yml` | BEDTools 2.31.1 | Blacklist filtering and motif sequence/background intervals |
+| `envs/subread.yml` | Subread 2.1.1 | Paired-end fragment counts over consensus peak intervals |
 | `envs/meme.yml` | MEME Suite 5.5.7 | AME, STREME, and FIMO |
 | `envs/multiqc.yml` | MultiQC 1.25.2 | Consolidated report and summary tables |
 
@@ -276,6 +279,9 @@ results/
   peaks/<sample_id>/broad/raw/
   peaks/<sample_id>/broad/final/
   peaks/<sample_id>/narrow_motif_qc/
+  differential_binding/<assay_target>/
+    consensus_peaks.bed
+    fragment_counts.tsv
   qc/library/<sample_id>/
   qc/fragments/<sample_id>/
   qc/peaks/<sample_id>/
@@ -295,6 +301,21 @@ results/
 - `fastqc/` contains paired FastQC HTML/ZIP outputs.
 - `alignment/` contains the primary analysis BAM/BAI, MAPQ-filtered BAM/BAI,
   Bowtie2 summary, and process version records.
+- `differential_binding/<assay_target>/` contains a union consensus of the
+  assay's final target broad peaks and a raw paired-end fragment count matrix.
+  The matrix has one row per consensus interval, BED coordinates, and one
+  count column per target `sample_id`. IgG samples are excluded from this
+  matrix; their BAMs remain controls for MACS2 peak calling and QC. The matrix
+  is an input for a downstream differential-binding method, not a differential
+  test result. Add a separate design table with condition and replicate labels
+  before testing. The consensus includes intervals called in any target
+  sample; it does not apply a replicate-support threshold. Peak calls use the
+  sorted analysis BAMs; the count matrix uses the filtered BAMs, which keep
+  properly paired primary alignments at or above `--min_mapq`. This can leave
+  a candidate interval with zero counts if its peak call was supported only by
+  reads removed by those filters. The filtered BAMs do not have duplicate
+  alignments marked or removed, so the count matrix includes them; inspect the
+  library duplicate metrics before differential testing.
 - `coverage/` contains RPKM `coverage.RPKM.bw` files generated with MAPQ
   filtering, 50-bp bins, centered/extended reads, 250-bp smoothing, and
   duplicate ignoring.
