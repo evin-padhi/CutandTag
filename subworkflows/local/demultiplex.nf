@@ -64,11 +64,9 @@ workflow DEMULTIPLEX {
             meta.remove('i2')
             tuple(meta, file(record.r1), file(record.r2))
         }
-        reads_ch.into { metric_reads_ch; fastqc_reads_ch }
-        DIRECT_INPUT_METRICS(metric_reads_ch)
+        DIRECT_INPUT_METRICS(reads_ch)
         metrics_ch = DIRECT_INPUT_METRICS.out.metrics
         demux_versions_ch = DIRECT_INPUT_METRICS.out.versions
-        reads_ch = fastqc_reads_ch
     }
 
     FASTQC(reads_ch)

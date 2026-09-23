@@ -52,8 +52,9 @@ workflow DIFFERENTIAL_BINDING {
             bam_rows.collect { bam_row ->
                 def (sample_id, bam_assay, bam_condition, meta, bam, bai) = bam_row
                 def peak_row = peaks_by_id[sample_id]
-                def (_, peak_assay, peak_condition, peaks) = peak_row
-                if (bam_assay != peak_assay || bam_condition != peak_condition) {
+                def (peak_sample_id, peak_assay, peak_condition, peaks) = peak_row
+                if (peak_sample_id != sample_id || bam_assay != peak_assay ||
+                    bam_condition != peak_condition) {
                     throw new IllegalStateException(
                         "metadata mismatch for ${sample_id}: BAM assay/condition " +
                         "${bam_assay}/${bam_condition}; peak assay/condition " +

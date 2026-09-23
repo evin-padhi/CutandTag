@@ -40,8 +40,8 @@ process COUNT_DIFFERENTIAL_FRAGMENTS {
 
     mkdir -p count_bams
     for index in "\${!sample_ids[@]}"; do
-        ln -s "\$PWD/\${bam_sources[$index]}" \\
-            "count_bams/\${sample_ids[$index]}.bam"
+        ln -s "\$PWD/\${bam_sources[index]}" \\
+            "count_bams/\${sample_ids[index]}.bam"
     done
     bam_paths=(count_bams/*.bam)
     if [[ \${#bam_paths[@]} -ne \${#sample_ids[@]} ]]; then

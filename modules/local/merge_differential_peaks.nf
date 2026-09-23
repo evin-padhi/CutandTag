@@ -83,9 +83,9 @@ process MERGE_DIFFERENTIAL_PEAKS {
     for condition in "\${condition_names[@]}"; do
         condition_inputs=()
         for index in "\${!conditions[@]}"; do
-            if [[ "\${conditions[$index]}" == "\${condition}" ]]; then
+            if [[ "\${conditions[index]}" == "\${condition}" ]]; then
                 sorted_peak="condition_\${condition_number}_sample_\${index}.bed"
-                bedtools sort -i "\${peak_sources[$index]}" > "\${sorted_peak}"
+                bedtools sort -i "\${peak_sources[index]}" > "\${sorted_peak}"
                 condition_inputs+=("\${sorted_peak}")
             fi
         done
@@ -95,7 +95,7 @@ process MERGE_DIFFERENTIAL_PEAKS {
             | awk -v required="\${support}" 'BEGIN { OFS = "\\t" }
                 \$4 >= required { print \$1, \$2, \$3 }' \\
             >> reproducible_condition_peaks.bed
-        condition_number=$((condition_number + 1))
+        ((condition_number += 1))
     done 2> "merge_differential_peaks.log"
     if [[ ! -s reproducible_condition_peaks.bed ]]; then
         printf 'No reproducible narrow peaks were called for assay %s\\n' \\
