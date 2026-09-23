@@ -4,8 +4,10 @@ This Nextflow DSL2 workflow demultiplexes paired-end bulk nano-CUT&Tag reads
 with an 8-base I2 barcode, aligns each derived sample, calls matched-IgG
 NanoScope-compatible broad peaks, calculates library/peak QC, and optionally
 tests expected and de novo motifs or peak-overlap enrichment against public
-ChIP-seq references. The repository includes the exact six-library manifest
-mapping in `assets/samples.example.csv`.
+ChIP-seq references. It also creates assay-specific consensus peak intervals
+and a paired-end fragment count matrix for downstream differential-binding
+analysis. The repository includes the exact six-library manifest mapping in
+`assets/samples.example.csv`.
 
 ## Prerequisites
 
@@ -27,7 +29,9 @@ The `conda` profile is the most direct portable installation path. Nextflow
 automatically creates each process environment from the repository-local,
 exactly pinned YAML file when it is first needed; users should not create a
 single combined environment by hand. The Docker profile uses the
-process-specific pinned images declared in the modules.
+process-specific pinned images declared in the modules. The DiffBind image is
+built by the repository workflow and hosted on GitHub Container Registry.
+Cluster nodes need public package access or registry credentials to pull it.
 
 Nextflow runtime execution was not verified in this workspace. Unit tests,
 static assertions, and direct synthetic fixtures were verified, but Nextflow
@@ -46,8 +50,10 @@ The canonical environments are:
 | `envs/bowtie2.yml` | Bowtie2 2.5.4 | Index construction and alignment |
 | `envs/samtools.yml` | SAMtools 1.20 | BAM sorting/filtering/indexing, metrics, fragments |
 | `envs/deeptools.yml` | deepTools 3.5.5 | RPKM bigWig and optional TSS enrichment |
-| `envs/macs2.yml` | MACS2 2.2.9.1 | Broad primary and narrow motif-only peak calls |
+| `envs/macs2.yml` | MACS2 2.2.9.1 | Broad primary and matched-control narrow peak calls |
 | `envs/bedtools.yml` | BEDTools 2.31.1 | Blacklist filtering and motif sequence/background intervals |
+| `envs/subread.yml` | Subread 2.1.1 | Paired-end fragment counts over consensus peak intervals |
+| `envs/diffbind.yml` | DiffBind 3.20.0, DESeq2 1.50.2, R 4.5.3, tidyverse 2.0.0 | Pairwise differential binding and replicate correlation QC |
 | `envs/meme.yml` | MEME Suite 5.5.7 | AME, STREME, and FIMO |
 | `envs/multiqc.yml` | MultiQC 1.25.2 | Consolidated report and summary tables |
 
@@ -97,7 +103,7 @@ With the default `--demultiplex_i2 true`, the CSV has one row per
 barcode-derived sample and this exact header:
 
 ```csv
-sample_id,library_id,input_group,barcode,assay_target,is_control,control_id,expected_motif,r1,r2,i2
+sample_id,library_id,input_group,condition,barcode,assay_target,is_control,control_id,expected_motif,r1,r2,i2
 ```
 
 The columns mean:
@@ -109,6 +115,10 @@ The columns mean:
   physical library is streamed only once.
 - `input_group`: biological input group used to require same-input matched
   controls, for example `25K`, `50K`, or `100K`.
+- `condition`: replicate group for differential peak preparation, such as
+  `disomy`, `ts18`, or `ts21`. It is required for every target and must be
+  blank for IgG controls. Use the same value for biological replicates in the
+  same condition.
 - `barcode`: expected I2 sequence in FASTQ orientation. Required when
   `--demultiplex_i2 true`; all barcodes must be non-empty and equal length,
   and barcodes within a library must be unique. Leave blank when false.
@@ -253,7 +263,7 @@ parameters use two.
 | `--macs_keep_dup` | Fixed `1` | NanoScope-compatible MACS2 duplicate setting; other values are rejected. |
 | `--macs_broad_cutoff` | Fixed `0.1` | Primary broad-peak cutoff; other values are rejected. |
 | `--macs_max_gap` | Fixed `1000` | Primary broad-peak maximum gap; other values are rejected. |
-| `--motif_use_narrow_peaks` | `true` | Use matched-control narrow summits for motif windows. If false, use final broad-peak midpoints. |
+| `--motif_use_narrow_peaks` | `true` | Use matched-control narrow summits for motif windows. If false, use final broad-peak midpoints. Narrow calls still run for differential peak preparation. |
 | `--motif_window` | `200` | Positive total motif-window width in bp. Windows shift at reference edges; a shorter contig yields its full length. |
 | `--enrichment_permutations` | `1000` | Positive number of attempted null permutations for every foreground/reference/model comparison. |
 | `--enrichment_seed` | `1729` | Integer base seed recorded in enrichment outputs; comparison/model-specific streams remain deterministic. |
@@ -275,7 +285,21 @@ results/
   coverage/<sample_id>/
   peaks/<sample_id>/broad/raw/
   peaks/<sample_id>/broad/final/
-  peaks/<sample_id>/narrow_motif_qc/
+  peaks/<sample_id>/narrow/
+  differential_binding/<assay_target>/
+    consensus_peaks.bed
+    fragment_counts.tsv
+    diffbind_results.tsv
+    diffbind_comparison_summary.tsv
+    diffbind_mode_correlations.tsv
+    replicate_correlation.tsv
+    replicate_correlation_heatmap.pdf
+    target_only_qq.pdf
+    target_minus_igg_qq.pdf
+    diffbind_mode_fold_change_correlation.pdf
+    <condition1>_vs_<condition2>_ma.pdf
+    <condition1>_vs_<condition2>_volcano.pdf
+    replicate_scatter_<condition>_<sample1>_vs_<sample2>.pdf
   qc/library/<sample_id>/
   qc/fragments/<sample_id>/
   qc/peaks/<sample_id>/
@@ -295,12 +319,57 @@ results/
 - `fastqc/` contains paired FastQC HTML/ZIP outputs.
 - `alignment/` contains the primary analysis BAM/BAI, MAPQ-filtered BAM/BAI,
   Bowtie2 summary, and process version records.
+- `differential_binding/<assay_target>/` contains a union consensus of
+  reproducible narrow peaks and a raw paired-end fragment count matrix.
+  The matrix has one row per consensus interval, BED coordinates, and one
+  count column per target `sample_id`. IgG samples are excluded from this
+  matrix; their BAMs remain controls for MACS2 peak calling and QC. The matrix
+  is retained as a raw-count audit table. DiffBind also tests every pair of
+  conditions with at least two target replicates per condition. It uses the same
+  fixed consensus intervals for two count modes: target-only counts and counts
+  after scaled subtraction of each target's matched IgG. DESeq2 uses an
+  unpaired `~Condition` model. `diffbind_results.tsv` contains all peak-level
+  results; `diffbind_comparison_summary.tsv` reports tested and significant
+  peak counts per contrast and mode. Benjamini-Hochberg adjustment is applied
+  separately within each contrast and count mode; adjusted p-value below 0.05
+  marks a significant peak.
+
+  Each QQ plot shows observed against expected -log10(p-values), with all
+  pairwise comparisons for that count mode on one plot. The mode correlation
+  plot compares target-only and target-minus-IgG log2 fold changes for each
+  consensus peak, with one panel per condition comparison. The accompanying
+  `diffbind_mode_correlations.tsv` reports Pearson and Spearman correlations
+  and the number of paired peaks for each comparison. These mode comparisons
+  are descriptive; IgG subtraction can change both effect estimates and their
+  uncertainty.
+
+  `replicate_correlation.tsv` reports Pearson and Spearman correlations for
+  every target-sample pair within each assay and condition. The correlation
+  plots use normalized target-only counts over the consensus intervals after
+  `log2(count + 1)` transformation. Correlations are descriptive QC. They do
+  not remove samples automatically and do not prove biological replication.
+  IgG-subtracted and target-only analyses are separate results; interpret them
+  together. Without spike-in calibration, the analysis reports relative binding
+  differences and does not establish absolute genome-wide occupancy changes.
+
+  Within each assay and condition, intervals must overlap calls from
+  at least two target samples when that condition has two or more samples. A
+  condition with one target sample uses its calls. The condition-level sets
+  are then combined for counting. Peak calls use matched-IgG narrowPeak calls
+  with MACS2 summit calling on sorted analysis BAMs; the count matrix uses the
+  filtered BAMs, which keep
+  properly paired primary alignments at or above `--min_mapq`. This can leave
+  a candidate interval with zero counts if its peak call was supported only by
+  reads removed by those filters. The filtered BAMs do not have duplicate
+  alignments marked or removed, so the count matrix includes them; inspect the
+  library duplicate metrics before differential testing.
 - `coverage/` contains RPKM `coverage.RPKM.bw` files generated with MAPQ
   filtering, 50-bp bins, centered/extended reads, 250-bp smoothing, and
   duplicate ignoring.
 - `peaks/` retains the matched-IgG raw broadPeak/gappedPeak/XLS/log, the
-  blacklist-filtered `final.broadPeak`, and optional motif-only narrowPeak and
-  summits.
+  blacklist-filtered `final.broadPeak`, plus matched-IgG narrowPeak and summit
+  files for every target sample. NarrowPeak calls support differential peak
+  inputs and motif analysis.
 - `qc/library/` contains SAMtools flagstat/stats/idxstats, insert sizes,
   markdup metrics, filtered-read/fragment counts, and custom summary inputs.
 - `qc/fragments/` and `qc/peaks/` contain target-only BEDPE fragments,
@@ -437,10 +506,12 @@ this broad call is the compatibility objective. Final broad peaks drive
 blacklist filtering, FRiP, peak QC, and the principal results.
 
 Narrow calls use the same target/control BAMs, BAMPE mode, local lambda, and
-duplicate setting, but exist only to provide localized summits for motif QC.
-They never replace the broad results or FRiP. Set
-`--motif_use_narrow_peaks false` to skip them and center motif windows on
-broad-peak midpoints.
+duplicate setting. MACS2 also calls summits. The pipeline runs these calls for
+all target samples to prepare differential peak inputs and motif analysis.
+They do not replace broad peaks in the primary peak results or FRiP. Set
+`--motif_use_narrow_peaks false` to center motif windows on broad-peak
+midpoints; this does not disable narrow calls used by differential peak
+preparation.
 
 ## Motif database and expected motifs
 

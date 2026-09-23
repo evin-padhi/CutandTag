@@ -63,10 +63,10 @@ checks = {
             main,
             re.S,
         ),
-    "peak call matches its four-input contract":
+    "peak call matches its three-input contract":
         re.search(
             r"PEAKS\(\s*ALIGN_QC\.out\.analysis_bam,\s*blacklist_ch,\s*"
-            r"macs_genome_size_ch,\s*narrow_peaks_ch\s*\)",
+            r"macs_genome_size_ch\s*\)",
             main,
             re.S,
         ),

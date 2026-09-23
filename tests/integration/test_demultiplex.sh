@@ -139,9 +139,9 @@ IIIIIIII
 EOF
 
 cat > "$tmp_dir/samples.csv" <<EOF
-sample_id,library_id,input_group,barcode,assay_target,is_control,control_id,expected_motif,r1,r2,i2
-lib_IgG,lib,25K,TATAGCCT,IgG,true,,,r1-source/reads.fastq,r2-source/reads.fastq,i2-source/reads.fastq
-lib_CTCF,lib,25K,ATAGAGGC,CTCF,false,lib_IgG,CTCF,r1-source/reads.fastq,r2-source/reads.fastq,i2-source/reads.fastq
+sample_id,library_id,input_group,condition,barcode,assay_target,is_control,control_id,expected_motif,r1,r2,i2
+lib_IgG,lib,25K,,TATAGCCT,IgG,true,,,r1-source/reads.fastq,r2-source/reads.fastq,i2-source/reads.fastq
+lib_CTCF,lib,25K,group_A,ATAGAGGC,CTCF,false,lib_IgG,CTCF,r1-source/reads.fastq,r2-source/reads.fastq,i2-source/reads.fastq
 EOF
 
 python3 bin/manifest.py validate \

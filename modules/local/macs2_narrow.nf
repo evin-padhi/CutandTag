@@ -22,13 +22,13 @@ def validateNarrowMacsGenomeSize(rawValue) {
 }
 
 process MACS2_NARROW {
-    tag "${meta.sample_id} vs ${control_meta.sample_id} (motif QC)"
+    tag "${meta.sample_id} vs ${control_meta.sample_id} (narrow peaks)"
     label 'process_heavy'
 
     conda "${projectDir}/envs/macs2.yml"
     container 'quay.io/biocontainers/macs2:2.2.9.1--py39hbcbf7aa_4'
 
-    publishDir "${params.outdir}/peaks/${meta.sample_id}/narrow_motif_qc",
+    publishDir "${params.outdir}/peaks/${meta.sample_id}/narrow",
         mode: 'copy',
         overwrite: true
 
@@ -40,7 +40,6 @@ process MACS2_NARROW {
         path(control_bam, stageAs: 'control.analysis.bam'),
         path(control_bai, stageAs: 'control.analysis.bam.bai')
     val macs_genome_size
-    val narrow_enabled
 
     output:
     tuple val(meta), path("sample_peaks.narrowPeak"), emit: motif_peaks
@@ -48,9 +47,6 @@ process MACS2_NARROW {
     tuple val(meta), path("sample_peaks.xls"), emit: auxiliary
     tuple val(meta), path("macs2_narrow.log"), emit: logs
     tuple val(meta), path("macs2_narrow_versions.yml"), emit: versions
-
-    when:
-    narrow_enabled == true
 
     script:
     def genomeSize = validateNarrowMacsGenomeSize(macs_genome_size)
@@ -65,6 +61,7 @@ process MACS2_NARROW {
         -n "sample" \
         --llocal 100000 \
         --keep-dup 1 \
+        --call-summits \
         > "macs2_narrow.log" 2>&1
 
     touch "sample_peaks.narrowPeak"

@@ -3,6 +3,7 @@ nextflow.enable.dsl = 2
 include { DEMULTIPLEX } from './subworkflows/local/demultiplex'
 include { ALIGN_QC } from './subworkflows/local/align_qc'
 include { PEAKS } from './subworkflows/local/peaks'
+include { DIFFERENTIAL_BINDING } from './subworkflows/local/differential_binding'
 include { MOTIFS } from './subworkflows/local/motifs'
 include { ENRICHMENT } from './subworkflows/local/enrichment'
 include { QC } from './subworkflows/local/qc'
@@ -710,9 +711,6 @@ workflow NANOCUT {
     demultiplex_i2_ch = Channel.value(validated.demultiplex_i2)
     min_mapq_ch = Channel.value(validated.min_mapq)
     macs_genome_size_ch = Channel.value(validated.macs_genome_size)
-    narrow_peaks_ch = Channel.value(
-        validated.motif_db != null && validated.motif_use_narrow_peaks
-    )
     enrichment_results_ch = Channel.empty()
     enrichment_status_ch = Channel.empty()
     enrichment_plots_ch = Channel.empty()
@@ -735,8 +733,12 @@ workflow NANOCUT {
     PEAKS(
         ALIGN_QC.out.analysis_bam,
         blacklist_ch,
-        macs_genome_size_ch,
-        narrow_peaks_ch
+        macs_genome_size_ch
+    )
+    DIFFERENTIAL_BINDING(
+        ALIGN_QC.out.filtered_bam,
+        PEAKS.out.differential_narrow_peaks,
+        blacklist_ch
     )
 
     motif_metrics_ch = Channel.empty()
@@ -857,6 +859,7 @@ workflow NANOCUT {
     all_versions_ch = DEMULTIPLEX.out.versions.mix(
         ALIGN_QC.out.versions,
         PEAKS.out.versions,
+        DIFFERENTIAL_BINDING.out.versions,
         motif_versions_ch,
         enrichment_versions_ch,
         QC.out.versions,
@@ -894,6 +897,14 @@ workflow NANOCUT {
     library_metrics = ALIGN_QC.out.metrics
     coverage = ALIGN_QC.out.coverage
     final_broad_peaks = PEAKS.out.final_broad_peaks
+    differential_consensus_peaks = DIFFERENTIAL_BINDING.out.consensus_peaks
+    differential_fragment_counts = DIFFERENTIAL_BINDING.out.fragment_counts
+    differential_binding_results = DIFFERENTIAL_BINDING.out.diffbind_results
+    differential_binding_summary = DIFFERENTIAL_BINDING.out.diffbind_summary
+    differential_binding_mode_correlations = DIFFERENTIAL_BINDING.out.diffbind_mode_correlations
+    differential_replicate_correlations = DIFFERENTIAL_BINDING.out.replicate_correlations
+    differential_binding_peak_ids = DIFFERENTIAL_BINDING.out.diffbind_peak_ids
+    differential_binding_plots = DIFFERENTIAL_BINDING.out.diffbind_plots
     motif_metrics = motif_metrics_ch
     enrichment_results = enrichment_results_ch
     enrichment_status = enrichment_status_ch
