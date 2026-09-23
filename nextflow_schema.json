@@ -62,6 +62,11 @@
       "default": false,
       "description": "Permit zero-read derived samples for diagnostic runs."
     },
+    "demultiplex_i2": {
+      "type": "boolean",
+      "default": true,
+      "description": "Split pooled FASTQs by I2 barcode. Set false when the manifest has one already split R1/R2 pair per sample."
+    },
     "min_mapq": {
       "type": "integer",
       "minimum": 0,

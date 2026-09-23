@@ -63,6 +63,7 @@ with open("demultiplex.metrics.json", encoding="utf-8") as handle:
 
 columns = [
     "library_id",
+    "processing_mode",
     "total_read_pairs",
     "assigned_read_pairs",
     "ambiguous_read_pairs",
@@ -71,15 +72,17 @@ columns = [
     "ambiguous_fraction",
     "unassigned_fraction",
 ]
+already_split = metrics.get("processing_mode") == "already_split"
 row = {
     "library_id": library_id,
-    "total_read_pairs": metrics.get("total_reads", 0),
-    "assigned_read_pairs": metrics.get("assigned_reads", 0),
-    "ambiguous_read_pairs": metrics.get("ambiguous_reads", 0),
-    "unassigned_read_pairs": metrics.get("unassigned_reads", 0),
-    "assigned_fraction": metrics.get("assigned_fraction", 0),
-    "ambiguous_fraction": metrics.get("ambiguous_fraction", 0),
-    "unassigned_fraction": metrics.get("unassigned_fraction", 0),
+    "processing_mode": metrics.get("processing_mode", "i2_demultiplexed"),
+    "total_read_pairs": None if already_split else metrics.get("total_reads", 0),
+    "assigned_read_pairs": None if already_split else metrics.get("assigned_reads", 0),
+    "ambiguous_read_pairs": None if already_split else metrics.get("ambiguous_reads", 0),
+    "unassigned_read_pairs": None if already_split else metrics.get("unassigned_reads", 0),
+    "assigned_fraction": None if already_split else metrics.get("assigned_fraction", 0),
+    "ambiguous_fraction": None if already_split else metrics.get("ambiguous_fraction", 0),
+    "unassigned_fraction": None if already_split else metrics.get("unassigned_fraction", 0),
 }
 with open(output_name, "w", encoding="utf-8", newline="") as handle:
     writer = csv.DictWriter(handle, fieldnames=columns, delimiter="\\t")

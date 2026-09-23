@@ -25,18 +25,16 @@ REQUIRED_COLUMNS = (
     "r2",
     "i2",
 )
-REQUIRED_VALUES = (
+COMMON_REQUIRED_VALUES = (
     "sample_id",
     "library_id",
     "input_group",
-    "barcode",
     "assay_target",
     "is_control",
     "r1",
     "r2",
-    "i2",
 )
-FASTQ_COLUMNS = ("r1", "r2", "i2")
+FASTQ_COLUMNS = ("r1", "r2")
 ASSAY_TARGETS = {"IgG", "CTCF", "GATA1", "RUNX1"}
 TRUE_VALUES = {"true", "1", "yes"}
 FALSE_VALUES = {"false", "0", "no"}
@@ -83,7 +81,9 @@ def _resolve_fastq(
     return str(path)
 
 
-def _read_rows(path: Path, check_files: bool) -> list[dict[str, object]]:
+def _read_rows(
+    path: Path, check_files: bool, demultiplex_i2: bool
+) -> list[dict[str, object]]:
     if not path.is_file():
         raise ManifestValidationError(f"manifest file does not exist: {path}")
 
@@ -99,7 +99,10 @@ def _read_rows(path: Path, check_files: bool) -> list[dict[str, object]]:
         records: list[dict[str, object]] = []
         for row_number, row in enumerate(reader, start=2):
             values = {column: _nonempty(row.get(column)) for column in REQUIRED_COLUMNS}
-            missing_values = [column for column in REQUIRED_VALUES if values[column] is None]
+            required_values = list(COMMON_REQUIRED_VALUES)
+            if demultiplex_i2:
+                required_values.extend(("barcode", "i2"))
+            missing_values = [column for column in required_values if values[column] is None]
             if missing_values:
                 raise ManifestValidationError(
                     f"row {row_number}: required values are blank: {', '.join(missing_values)}"
@@ -135,12 +138,14 @@ def _read_rows(path: Path, check_files: bool) -> list[dict[str, object]]:
                 "control_id": values["control_id"],
                 "expected_motif": values["expected_motif"],
             }
-            for column in FASTQ_COLUMNS:
+            for column in (*FASTQ_COLUMNS, "i2"):
                 value = values[column]
-                assert isinstance(value, str)
-                normalized[column] = _resolve_fastq(
-                    value, path.parent, row_number, column, check_files
-                )
+                if value is None:
+                    normalized[column] = None
+                else:
+                    normalized[column] = _resolve_fastq(
+                        str(value), path.parent, row_number, column, check_files
+                    )
             normalized["_row_number"] = row_number
             records.append(normalized)
 
@@ -149,13 +154,17 @@ def _read_rows(path: Path, check_files: bool) -> list[dict[str, object]]:
     return records
 
 
-def _validate_relationships(records: list[dict[str, object]]) -> None:
+def _validate_relationships(
+    records: list[dict[str, object]], demultiplex_i2: bool
+) -> None:
     samples: dict[str, dict[str, object]] = {}
     library_paths: dict[str, tuple[str, str, str]] = {}
     library_barcodes: dict[str, dict[str, str]] = {}
-    barcode_lengths = {len(str(record["barcode"])) for record in records}
-    if len(barcode_lengths) != 1 or 0 in barcode_lengths:
-        raise ManifestValidationError("all barcodes must be non-empty and equal length")
+    library_samples: dict[str, str] = {}
+    if demultiplex_i2:
+        barcode_lengths = {len(str(record["barcode"])) for record in records}
+        if len(barcode_lengths) != 1 or 0 in barcode_lengths:
+            raise ManifestValidationError("all barcodes must be non-empty and equal length")
 
     for record in records:
         row_number = record["_row_number"]
@@ -165,20 +174,33 @@ def _validate_relationships(records: list[dict[str, object]]) -> None:
         samples[sample_id] = record
 
         library_id = str(record["library_id"])
-        paths = tuple(str(record[column]) for column in FASTQ_COLUMNS)
+        if not demultiplex_i2:
+            previous_sample = library_samples.get(library_id)
+            if previous_sample is not None:
+                raise ManifestValidationError(
+                    f"row {row_number}: direct-input library {library_id!r} is used by "
+                    f"multiple samples {previous_sample!r} and {sample_id!r}; "
+                    "use one unique library_id per sample"
+                )
+            library_samples[library_id] = sample_id
+        paths = tuple(
+            str(record[column])
+            for column in (*FASTQ_COLUMNS, *(('i2',) if demultiplex_i2 else ()))
+        )
         previous_paths = library_paths.setdefault(library_id, paths)
         if paths != previous_paths:
             raise ManifestValidationError(
                 f"row {row_number}: library {library_id!r} has inconsistent FASTQ paths"
             )
-        barcode = str(record["barcode"])
-        previous_sample = library_barcodes.setdefault(library_id, {}).get(barcode)
-        if previous_sample is not None:
-            raise ManifestValidationError(
-                f"row {row_number}: library {library_id!r} has duplicate barcode "
-                f"{barcode!r} for samples {previous_sample!r} and {sample_id!r}"
-            )
-        library_barcodes[library_id][barcode] = sample_id
+        if demultiplex_i2:
+            barcode = str(record["barcode"])
+            previous_sample = library_barcodes.setdefault(library_id, {}).get(barcode)
+            if previous_sample is not None:
+                raise ManifestValidationError(
+                    f"row {row_number}: library {library_id!r} has duplicate barcode "
+                    f"{barcode!r} for samples {previous_sample!r} and {sample_id!r}"
+                )
+            library_barcodes[library_id][barcode] = sample_id
 
     for record in records:
         row_number = record["_row_number"]
@@ -228,12 +250,14 @@ def _validate_relationships(records: list[dict[str, object]]) -> None:
             )
 
 
-def load_and_validate(path: Path, *, check_files: bool = True) -> list[dict[str, object]]:
+def load_and_validate(
+    path: Path, *, check_files: bool = True, demultiplex_i2: bool = True
+) -> list[dict[str, object]]:
     """Load a CSV manifest, validate it, and return normalized records."""
 
     manifest_path = Path(path).resolve()
-    records = _read_rows(manifest_path, check_files)
-    _validate_relationships(records)
+    records = _read_rows(manifest_path, check_files, demultiplex_i2)
+    _validate_relationships(records, demultiplex_i2)
     for record in records:
         del record["_row_number"]
     return records
@@ -261,6 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     validate_parser.add_argument("--input", type=Path, required=True)
     validate_parser.add_argument("--output", type=Path, required=True)
     validate_parser.add_argument(
+        "--demultiplex-i2", action=argparse.BooleanOptionalAction, default=True
+    )
+    validate_parser.add_argument(
         "--skip-file-checks",
         action="store_true",
         help="validate manifest schema and relationships without requiring FASTQ files",
@@ -269,7 +296,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         records = load_and_validate(
-            arguments.input, check_files=not arguments.skip_file_checks
+            arguments.input,
+            check_files=not arguments.skip_file_checks,
+            demultiplex_i2=arguments.demultiplex_i2,
         )
         _write_json(records, arguments.output)
     except ManifestValidationError as error:
