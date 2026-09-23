@@ -29,7 +29,9 @@ The `conda` profile is the most direct portable installation path. Nextflow
 automatically creates each process environment from the repository-local,
 exactly pinned YAML file when it is first needed; users should not create a
 single combined environment by hand. The Docker profile uses the
-process-specific pinned images declared in the modules.
+process-specific pinned images declared in the modules. The DiffBind image is
+built by the repository workflow and hosted on GitHub Container Registry.
+Cluster nodes need public package access or registry credentials to pull it.
 
 Nextflow runtime execution was not verified in this workspace. Unit tests,
 static assertions, and direct synthetic fixtures were verified, but Nextflow
@@ -51,6 +53,7 @@ The canonical environments are:
 | `envs/macs2.yml` | MACS2 2.2.9.1 | Broad primary and matched-control narrow peak calls |
 | `envs/bedtools.yml` | BEDTools 2.31.1 | Blacklist filtering and motif sequence/background intervals |
 | `envs/subread.yml` | Subread 2.1.1 | Paired-end fragment counts over consensus peak intervals |
+| `envs/diffbind.yml` | DiffBind 3.20.0, DESeq2 1.50.2, R 4.5.3, tidyverse 2.0.0 | Pairwise differential binding and replicate correlation QC |
 | `envs/meme.yml` | MEME Suite 5.5.7 | AME, STREME, and FIMO |
 | `envs/multiqc.yml` | MultiQC 1.25.2 | Consolidated report and summary tables |
 
@@ -286,6 +289,13 @@ results/
   differential_binding/<assay_target>/
     consensus_peaks.bed
     fragment_counts.tsv
+    diffbind_results.tsv
+    diffbind_comparison_summary.tsv
+    replicate_correlation.tsv
+    replicate_correlation_heatmap.pdf
+    <condition1>_vs_<condition2>_ma.pdf
+    <condition1>_vs_<condition2>_volcano.pdf
+    replicate_scatter_<condition>_<sample1>_vs_<sample2>.pdf
   qc/library/<sample_id>/
   qc/fragments/<sample_id>/
   qc/peaks/<sample_id>/
@@ -310,9 +320,26 @@ results/
   The matrix has one row per consensus interval, BED coordinates, and one
   count column per target `sample_id`. IgG samples are excluded from this
   matrix; their BAMs remain controls for MACS2 peak calling and QC. The matrix
-  is an input for a downstream differential-binding method, not a differential
-  test result. Use `condition` and replicate labels from the manifest in the
-  downstream design table. Within each assay and condition, intervals must overlap calls from
+  is retained as a raw-count audit table. DiffBind also tests every pair of
+  conditions with at least two target replicates per condition. It uses the same
+  fixed consensus intervals for two count modes: target-only counts and counts
+  after scaled subtraction of each target's matched IgG. DESeq2 uses an
+  unpaired `~Condition` model. `diffbind_results.tsv` contains all peak-level
+  results; `diffbind_comparison_summary.tsv` reports tested and significant
+  peak counts per contrast and mode. Benjamini-Hochberg adjustment is applied
+  separately within each contrast and count mode; adjusted p-value below 0.05
+  marks a significant peak.
+
+  `replicate_correlation.tsv` reports Pearson and Spearman correlations for
+  every target-sample pair within each assay and condition. The correlation
+  plots use normalized target-only counts over the consensus intervals after
+  `log2(count + 1)` transformation. Correlations are descriptive QC. They do
+  not remove samples automatically and do not prove biological replication.
+  IgG-subtracted and target-only analyses are separate results; interpret them
+  together. Without spike-in calibration, the analysis reports relative binding
+  differences and does not establish absolute genome-wide occupancy changes.
+
+  Within each assay and condition, intervals must overlap calls from
   at least two target samples when that condition has two or more samples. A
   condition with one target sample uses its calls. The condition-level sets
   are then combined for counting. Peak calls use matched-IgG narrowPeak calls

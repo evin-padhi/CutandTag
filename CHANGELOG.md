@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased
+
+- Added DiffBind target-only and matched-IgG-subtracted differential binding
+  for all pairwise condition comparisons over the fixed consensus peaks.
+- Added per-contrast result and summary tables, MA and volcano plots, and
+  target-only replicate correlation tables and plots.
+- Added a pinned DiffBind Conda environment and a micromamba-based container
+  build workflow.
+
 ## 0.1.0 — 2026-07-23
 
 - Added strict CSV manifest validation and synchronized streaming I2
