@@ -578,10 +578,14 @@ main <- function() {
   }
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   log_file <- file.path(outdir, "diffbind_analysis.log")
-  sink(log_file, split = TRUE)
-  on.exit(sink(), add = TRUE)
-  sink(log_file, type = "message", append = TRUE)
-  on.exit(sink(type = "message"), add = TRUE)
+  log_connection <- file(log_file, open = "wt")
+  sink(log_connection, split = TRUE)
+  sink(log_connection, type = "message")
+  on.exit({
+    sink(type = "message")
+    sink()
+    close(log_connection)
+  }, add = TRUE)
   log_message("Validating inputs for assay ", assay)
   samples <- validate_samples(sample_sheet, assay)
   bed <- validate_bed(consensus_bed)
