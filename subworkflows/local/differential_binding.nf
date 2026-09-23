@@ -13,7 +13,7 @@ workflow DIFFERENTIAL_BINDING {
         .map { meta, bam, bai ->
             tuple(new LinkedHashMap(meta), bam, bai)
         }
-        .collect()
+        .collect(flat: false)
 
     target_bams = filtered_bams
         .filter { meta, bam, bai -> !meta.is_control }
@@ -27,9 +27,12 @@ workflow DIFFERENTIAL_BINDING {
             meta.condition.toString(), peaks)
     }
 
-    paired_targets = target_bams.collect()
-        .combine(target_peaks.collect())
-        .flatMap { bam_rows, peak_rows ->
+    paired_targets = target_bams.collect(flat: false)
+        .map { rows -> [bam_rows: rows] }
+        .combine(target_peaks.collect(flat: false).map { rows -> [peak_rows: rows] })
+        .flatMap { combined_rows ->
+            def bam_rows = combined_rows[0].bam_rows
+            def peak_rows = combined_rows[1].peak_rows
             def duplicate_bams = bam_rows.groupBy { row -> row[0] }
                 .findAll { sample_id, rows -> rows.size() > 1 }.keySet()
             def duplicate_peaks = peak_rows.groupBy { row -> row[0] }
