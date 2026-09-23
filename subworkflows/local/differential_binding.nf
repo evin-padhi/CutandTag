@@ -18,7 +18,8 @@ workflow DIFFERENTIAL_BINDING {
     target_bams = filtered_bams
         .filter { meta, bam, bai -> !meta.is_control }
         .map { meta, bam, bai ->
-            tuple(meta.sample_id.toString(), new LinkedHashMap(meta), bam, bai)
+            tuple(meta.sample_id.toString(), meta.assay_target.toString(),
+                meta.condition.toString(), new LinkedHashMap(meta), bam, bai)
         }
 
     target_peaks = narrow_peaks.map { meta, peaks ->
@@ -26,16 +27,42 @@ workflow DIFFERENTIAL_BINDING {
             meta.condition.toString(), peaks)
     }
 
-    paired_targets = target_bams.join(target_peaks).map {
-            sample_id, meta, bam, bai, peak_assay, condition, peaks ->
-            if (meta.assay_target.toString() != peak_assay) {
+    paired_targets = target_bams.collect()
+        .combine(target_peaks.collect())
+        .flatMap { bam_rows, peak_rows ->
+            def duplicate_bams = bam_rows.groupBy { row -> row[0] }
+                .findAll { sample_id, rows -> rows.size() > 1 }.keySet()
+            def duplicate_peaks = peak_rows.groupBy { row -> row[0] }
+                .findAll { sample_id, rows -> rows.size() > 1 }.keySet()
+            if (!duplicate_bams.isEmpty() || !duplicate_peaks.isEmpty()) {
                 throw new IllegalStateException(
-                    "assay target mismatch for ${sample_id}: " +
-                    "BAM is ${meta.assay_target}; peak file is ${peak_assay}"
+                    "duplicate target sample IDs in BAMs ${duplicate_bams} or peak files ${duplicate_peaks}"
                 )
             }
-            tuple(meta.assay_target.toString(), sample_id, condition, meta, bam, bai, peaks)
-    }
+            def bams_by_id = bam_rows.collectEntries { row -> [(row[0]): row] }
+            def peaks_by_id = peak_rows.collectEntries { row -> [(row[0]): row] }
+            def missing_peaks = (bams_by_id.keySet() - peaks_by_id.keySet()).sort()
+            def missing_bams = (peaks_by_id.keySet() - bams_by_id.keySet()).sort()
+            if (!missing_peaks.isEmpty() || !missing_bams.isEmpty()) {
+                throw new IllegalStateException(
+                    "target BAM and narrowPeak sample IDs do not match; " +
+                    "missing peak files for ${missing_peaks}; missing BAMs for ${missing_bams}"
+                )
+            }
+            bam_rows.collect { bam_row ->
+                def (sample_id, bam_assay, bam_condition, meta, bam, bai) = bam_row
+                def peak_row = peaks_by_id[sample_id]
+                def (_, peak_assay, peak_condition, peaks) = peak_row
+                if (bam_assay != peak_assay || bam_condition != peak_condition) {
+                    throw new IllegalStateException(
+                        "metadata mismatch for ${sample_id}: BAM assay/condition " +
+                        "${bam_assay}/${bam_condition}; peak assay/condition " +
+                        "${peak_assay}/${peak_condition}"
+                    )
+                }
+                tuple(bam_assay, sample_id, bam_condition, meta, bam, bai, peaks)
+            }
+        }
 
     assay_groups = paired_targets
         .groupTuple(by: 0)

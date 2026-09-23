@@ -55,6 +55,9 @@ validate_bed <- function(path) {
   starts <- suppressWarnings(as.numeric(bed[[2]]))
   ends <- suppressWarnings(as.numeric(bed[[3]]))
   if (anyNA(bed[[1]]) || any(!nzchar(bed[[1]])) || anyNA(starts) || anyNA(ends) ||
+      any(!is.finite(starts)) || any(!is.finite(ends)) ||
+      any(starts != floor(starts)) || any(ends != floor(ends)) ||
+      any(starts > .Machine$integer.max) || any(ends > .Machine$integer.max) ||
       any(starts < 0) || any(ends <= starts)) {
     stop("Consensus BED has invalid chromosome, start, or end values.", call. = FALSE)
   }
@@ -119,6 +122,7 @@ validate_samples <- function(path) {
   if (nrow(insufficient) > 0) {
     stop(
       "At least two target replicates are required in every condition. Insufficient: ",
+      assay, ": ",
       paste0(insufficient$condition, " (", insufficient$replicates, ")", collapse = ", "),
       call. = FALSE
     )
@@ -197,7 +201,7 @@ safe_contrast <- function(value) {
   str_replace_all(value, "[^A-Za-z0-9._-]", "_")
 }
 
-report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mode, bed, sample_ids, fdr) {
+report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mode, bed, sample_ids, assay, fdr) {
   report <- dba.report(
     dba_object,
     contrast = contrast_id,
@@ -232,7 +236,7 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   if (length(count_columns) == 0) {
     stop("DiffBind report has no per-sample counts for contrast ", contrast_id, call. = FALSE)
   }
-  result <- report %>%
+  report_stats <- report %>%
     transmute(
       interval_key = paste(Chr, Start, End, sep = ":"),
       mean_group1 = as.numeric(Conc_group1),
@@ -240,8 +244,9 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
       log2_fold_change = as.numeric(Fold),
       p_value = as.numeric(`p-value`),
       adjusted_p_value = as.numeric(FDR)
-    ) %>%
-    left_join(bed, by = "interval_key") %>%
+    )
+  result <- bed %>%
+    left_join(report_stats, by = "interval_key") %>%
     mutate(
       assay_target = assay,
       contrast = paste0(contrast_row$Group1, "_vs_", contrast_row$Group2),
@@ -252,11 +257,8 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
       significant = !is.na(adjusted_p_value) & adjusted_p_value < fdr
     )
 
-  if (anyNA(result$peak_id)) {
-    stop("DiffBind changed or lost consensus intervals in contrast ", contrast_id, call. = FALSE)
-  }
   if (nrow(result) != nrow(bed)) {
-    stop("DiffBind returned a different number of intervals than the consensus BED.", call. = FALSE)
+    stop("Internal error while retaining consensus intervals in contrast ", contrast_id, call. = FALSE)
   }
   counts <- count_report %>%
     transmute(
@@ -301,6 +303,7 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
         count_mode,
         bed,
         samples$sample_id,
+        assay,
         fdr
       )
       result <- extracted$results
@@ -382,7 +385,10 @@ write_replicate_qc <- function(samples, bed, target_counts, outdir) {
     arrange(interval_key)
   raw_matrix <- count_wide %>% select(all_of(samples$sample_id)) %>% as.matrix()
   storage.mode(raw_matrix) <- "numeric"
-  size_factors <- estimateSizeFactorsForMatrix(raw_matrix)
+  if (!any(raw_matrix > 0)) {
+    stop("Target-only consensus-peak counts are all zero; replicate correlations cannot be computed.", call. = FALSE)
+  }
+  size_factors <- estimateSizeFactorsForMatrix(raw_matrix, type = "poscounts")
   normalized_matrix <- sweep(raw_matrix, 2, size_factors, "/")
   count_long <- as_tibble(normalized_matrix, .name_repair = "minimal") %>%
     set_names(samples$sample_id) %>%
@@ -440,8 +446,12 @@ write_replicate_qc <- function(samples, bed, target_counts, outdir) {
   correlation_long <- as_tibble(as.table(correlation_matrix), .name_repair = "minimal") %>%
     set_names(c("sample_id_1", "sample_id_2", "pearson")) %>%
     left_join(samples %>% select(sample_id, condition) %>% rename(condition_1 = condition), by = c("sample_id_1" = "sample_id")) %>%
-    left_join(samples %>% select(sample_id, condition) %>% rename(condition_2 = condition), by = c("sample_id_2" = "sample_id"))
-  heatmap <- ggplot(correlation_long, aes(sample_id_1, sample_id_2, fill = pearson)) +
+    left_join(samples %>% select(sample_id, condition) %>% rename(condition_2 = condition), by = c("sample_id_2" = "sample_id")) %>%
+    mutate(
+      sample_id_1_label = paste0(sample_id_1, "\n", condition_1),
+      sample_id_2_label = paste0(sample_id_2, "\n", condition_2)
+    )
+  heatmap <- ggplot(correlation_long, aes(sample_id_1_label, sample_id_2_label, fill = pearson)) +
     geom_tile(color = "white", linewidth = 0.2) +
     scale_fill_gradient2(limits = c(-1, 1), low = "#3B6FB6", mid = "white", high = "#B23A48", midpoint = 0) +
     labs(x = NULL, y = NULL, fill = "Pearson r") +
@@ -458,7 +468,7 @@ write_replicate_qc <- function(samples, bed, target_counts, outdir) {
       select(peak_id, sample_id, log2_count) %>%
       pivot_wider(names_from = sample_id, values_from = log2_count) %>%
       filter(is.finite(.data[[sample_id_1]]), is.finite(.data[[sample_id_2]])) %>%
-      mutate(extreme = abs(scale(.data[[sample_id_1]] - .data[[sample_id_2]]))[, 1] > 3)
+      mutate(extreme = abs(as.numeric(scale(.data[[sample_id_1]] - .data[[sample_id_2]]))) > 3)
     scatter <- ggplot(scatter_data, aes(.data[[sample_id_1]], .data[[sample_id_2]])) +
       geom_abline(slope = 1, intercept = 0, color = "grey60", linewidth = 0.3) +
       geom_point(size = 0.7, alpha = 0.55, color = "#356A7A") +
@@ -478,12 +488,12 @@ write_replicate_qc <- function(samples, bed, target_counts, outdir) {
 }
 
 main <- function() {
-  options <<- parse_args(commandArgs(trailingOnly = TRUE))
-  sample_sheet <- required_arg(options, "sample-sheet")
-  consensus_bed <- required_arg(options, "consensus-bed")
-  assay <- required_arg(options, "assay")
-  outdir <- required_arg(options, "outdir")
-  fdr <- as.numeric(options[["fdr"]] %||% "0.05")
+  cli_options <- parse_args(commandArgs(trailingOnly = TRUE))
+  sample_sheet <- required_arg(cli_options, "sample-sheet")
+  consensus_bed <- required_arg(cli_options, "consensus-bed")
+  assay <- required_arg(cli_options, "assay")
+  outdir <- required_arg(cli_options, "outdir")
+  fdr <- as.numeric(cli_options[["fdr"]] %||% "0.05")
   if (length(fdr) != 1 || is.na(fdr) || fdr <= 0 || fdr >= 1) {
     stop("--fdr must be greater than 0 and less than 1.", call. = FALSE)
   }
