@@ -899,6 +899,11 @@ workflow NANOCUT {
     final_broad_peaks = PEAKS.out.final_broad_peaks
     differential_consensus_peaks = DIFFERENTIAL_BINDING.out.consensus_peaks
     differential_fragment_counts = DIFFERENTIAL_BINDING.out.fragment_counts
+    differential_binding_results = DIFFERENTIAL_BINDING.out.diffbind_results
+    differential_binding_summary = DIFFERENTIAL_BINDING.out.diffbind_summary
+    differential_replicate_correlations = DIFFERENTIAL_BINDING.out.replicate_correlations
+    differential_binding_peak_ids = DIFFERENTIAL_BINDING.out.diffbind_peak_ids
+    differential_binding_plots = DIFFERENTIAL_BINDING.out.diffbind_plots
     motif_metrics = motif_metrics_ch
     enrichment_results = enrichment_results_ch
     enrichment_status = enrichment_status_ch
