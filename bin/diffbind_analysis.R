@@ -182,6 +182,7 @@ make_dba <- function(samples, assay, count_mode, consensus_bed, sample_peak_file
   )
   dba_object <- dba.contrast(
     dba_object,
+    design = FALSE,
     minMembers = 2,
     categories = DBA_CONDITION
   )
