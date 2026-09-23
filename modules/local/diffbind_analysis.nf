@@ -19,6 +19,7 @@ process DIFFBIND_ANALYSIS {
     output:
     tuple val(assay_target), path('diffbind_results.tsv'), emit: results
     tuple val(assay_target), path('diffbind_comparison_summary.tsv'), emit: summary
+    tuple val(assay_target), path('diffbind_mode_correlations.tsv'), emit: mode_correlations
     tuple val(assay_target), path('replicate_correlation.tsv'), emit: correlations
     tuple val(assay_target), path('consensus_peak_ids.tsv'), emit: peak_ids
     tuple val(assay_target), path('*.pdf', arity: '1..*'), emit: plots
@@ -66,6 +67,7 @@ process DIFFBIND_ANALYSIS {
 
     cp results/diffbind_results.tsv .
     cp results/diffbind_comparison_summary.tsv .
+    cp results/diffbind_mode_correlations.tsv .
     cp results/replicate_correlation.tsv .
     cp results/consensus_peak_ids.tsv .
     cp results/diffbind_analysis.log .

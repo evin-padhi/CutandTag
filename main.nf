@@ -901,6 +901,7 @@ workflow NANOCUT {
     differential_fragment_counts = DIFFERENTIAL_BINDING.out.fragment_counts
     differential_binding_results = DIFFERENTIAL_BINDING.out.diffbind_results
     differential_binding_summary = DIFFERENTIAL_BINDING.out.diffbind_summary
+    differential_binding_mode_correlations = DIFFERENTIAL_BINDING.out.diffbind_mode_correlations
     differential_replicate_correlations = DIFFERENTIAL_BINDING.out.replicate_correlations
     differential_binding_peak_ids = DIFFERENTIAL_BINDING.out.diffbind_peak_ids
     differential_binding_plots = DIFFERENTIAL_BINDING.out.diffbind_plots

@@ -190,6 +190,7 @@ workflow DIFFERENTIAL_BINDING {
     fragment_counts = COUNT_DIFFERENTIAL_FRAGMENTS.out.counts
     diffbind_results = DIFFBIND_ANALYSIS.out.results
     diffbind_summary = DIFFBIND_ANALYSIS.out.summary
+    diffbind_mode_correlations = DIFFBIND_ANALYSIS.out.mode_correlations
     replicate_correlations = DIFFBIND_ANALYSIS.out.correlations
     diffbind_peak_ids = DIFFBIND_ANALYSIS.out.peak_ids
     diffbind_plots = DIFFBIND_ANALYSIS.out.plots

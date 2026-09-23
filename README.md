@@ -291,8 +291,12 @@ results/
     fragment_counts.tsv
     diffbind_results.tsv
     diffbind_comparison_summary.tsv
+    diffbind_mode_correlations.tsv
     replicate_correlation.tsv
     replicate_correlation_heatmap.pdf
+    target_only_qq.pdf
+    target_minus_igg_qq.pdf
+    diffbind_mode_fold_change_correlation.pdf
     <condition1>_vs_<condition2>_ma.pdf
     <condition1>_vs_<condition2>_volcano.pdf
     replicate_scatter_<condition>_<sample1>_vs_<sample2>.pdf
@@ -329,6 +333,15 @@ results/
   peak counts per contrast and mode. Benjamini-Hochberg adjustment is applied
   separately within each contrast and count mode; adjusted p-value below 0.05
   marks a significant peak.
+
+  Each QQ plot shows observed against expected -log10(p-values), with all
+  pairwise comparisons for that count mode on one plot. The mode correlation
+  plot compares target-only and target-minus-IgG log2 fold changes for each
+  consensus peak, with one panel per condition comparison. The accompanying
+  `diffbind_mode_correlations.tsv` reports Pearson and Spearman correlations
+  and the number of paired peaks for each comparison. These mode comparisons
+  are descriptive; IgG subtraction can change both effect estimates and their
+  uncertainty.
 
   `replicate_correlation.tsv` reports Pearson and Spearman correlations for
   every target-sample pair within each assay and condition. The correlation

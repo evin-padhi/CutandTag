@@ -339,6 +339,74 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
   summaries <- bind_rows(summary_rows) %>% arrange(contrast, count_mode)
   write_tsv(results, file.path(outdir, "diffbind_results.tsv"), na = "")
   write_tsv(summaries, file.path(outdir, "diffbind_comparison_summary.tsv"), na = "")
+
+  qq_data <- results %>%
+    filter(is.finite(p_value), p_value >= 0, p_value <= 1) %>%
+    group_by(count_mode, contrast) %>%
+    arrange(p_value, .by_group = TRUE) %>%
+    mutate(
+      rank = row_number(),
+      expected_minus_log10_p = -log10((rank - 0.5) / n()),
+      observed_minus_log10_p = -log10(pmax(p_value, .Machine$double.xmin))
+    ) %>%
+    ungroup()
+  for (count_mode in modes) {
+    mode_qq_data <- qq_data %>% filter(.data$count_mode == count_mode)
+    qq_plot <- ggplot(mode_qq_data, aes(expected_minus_log10_p, observed_minus_log10_p, color = contrast, group = contrast)) +
+      geom_abline(slope = 1, intercept = 0, color = "grey55", linewidth = 0.35) +
+      geom_line(linewidth = 0.65, alpha = 0.9) +
+      labs(
+        x = "Expected -log10(p-value)",
+        y = "Observed -log10(p-value)",
+        color = "Comparison"
+      ) +
+      theme_minimal(base_size = 10) +
+      theme(legend.position = "bottom", panel.grid.minor = element_blank())
+    ggsave(file.path(outdir, paste0(count_mode, "_qq.pdf")), qq_plot, width = 7, height = 5)
+  }
+
+  mode_comparison <- results %>%
+    select(peak_id, contrast, count_mode, log2_fold_change) %>%
+    pivot_wider(names_from = count_mode, values_from = log2_fold_change) %>%
+    mutate(
+      has_finite_pair = is.finite(target_only) & is.finite(target_minus_igg)
+    )
+  mode_correlations <- mode_comparison %>%
+    group_by(contrast) %>%
+    group_modify(~ {
+      paired <- .x %>% filter(has_finite_pair)
+      x <- paired$target_only
+      y <- paired$target_minus_igg
+      reason <- case_when(
+        length(x) < 2 ~ "fewer than two peaks have finite fold changes in both modes",
+        n_distinct(x) < 2 || n_distinct(y) < 2 ~ "fold changes are constant in one mode",
+        TRUE ~ NA_character_
+      )
+      tibble(
+        peaks_used = length(x),
+        pearson = if (is.na(reason)) cor(x, y, method = "pearson") else NA_real_,
+        spearman = if (is.na(reason)) cor(x, y, method = "spearman") else NA_real_,
+        unavailable_reason = reason
+      )
+    }) %>%
+    ungroup()
+  write_tsv(mode_correlations, file.path(outdir, "diffbind_mode_correlations.tsv"), na = "")
+
+  mode_scatter <- ggplot(
+    mode_comparison %>% filter(has_finite_pair),
+    aes(target_only, target_minus_igg)
+  ) +
+    geom_abline(slope = 1, intercept = 0, color = "grey55", linewidth = 0.35) +
+    geom_point(size = 0.7, alpha = 0.55, color = "#356A7A") +
+    facet_wrap(vars(contrast)) +
+    labs(
+      x = "Target-only log2 fold change",
+      y = "Target minus matched IgG log2 fold change"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(outdir, "diffbind_mode_fold_change_correlation.pdf"), mode_scatter, width = 8, height = 5)
+
   plot_data <- results %>%
     mutate(
       count_mode = recode(count_mode,
@@ -371,7 +439,12 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
     ggsave(file.path(outdir, paste0(prefix, "_ma.pdf")), ma_plot, width = 8, height = 4.6)
     ggsave(file.path(outdir, paste0(prefix, "_volcano.pdf")), volcano_plot, width = 8, height = 4.6)
   }
-  list(results = results, target_counts = bind_rows(target_counts), summary = summaries)
+  list(
+    results = results,
+    target_counts = bind_rows(target_counts),
+    summary = summaries,
+    mode_correlations = mode_correlations
+  )
 }
 
 write_replicate_qc <- function(samples, bed, target_counts, outdir) {
@@ -523,7 +596,7 @@ main <- function() {
     paste0("  DESeq2: ", packageVersion("DESeq2")),
     paste0("  tidyverse: ", packageVersion("tidyverse"))
   ), file.path(outdir, "diffbind_analysis_versions.yml"))
-  log_message("Wrote DiffBind, comparison summary, replicate correlation tables, and plots to ", outdir)
+  log_message("Wrote DiffBind results, comparison summaries, replicate and mode correlation tables, and plots to ", outdir)
 }
 
 `%||%` <- function(x, y) if (is.null(x)) y else x
