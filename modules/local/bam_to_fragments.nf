@@ -5,7 +5,7 @@ process BAM_TO_FRAGMENTS {
     conda "${projectDir}/envs/samtools.yml"
     container 'quay.io/biocontainers/samtools:1.20--h50ea8bc_0'
 
-    publishDir "${params.outdir}/qc/fragments/${meta.sample_id}",
+    publishDir path: { "${params.outdir}/qc/fragments/${meta.sample_id}" },
         mode: 'copy',
         overwrite: true
 

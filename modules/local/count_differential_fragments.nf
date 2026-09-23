@@ -5,7 +5,7 @@ process COUNT_DIFFERENTIAL_FRAGMENTS {
     conda "${projectDir}/envs/subread.yml"
     container 'quay.io/biocontainers/subread:2.1.1--h577a1d6_0'
 
-    publishDir "${params.outdir}/differential_binding/${assay_target}",
+    publishDir path: { "${params.outdir}/differential_binding/${assay_target}" },
         mode: 'copy',
         overwrite: true
 
@@ -23,14 +23,16 @@ process COUNT_DIFFERENTIAL_FRAGMENTS {
 
     script:
     def sampleIds = sample_ids.join(' ')
+    def quoteShell = { value ->
+        "'" + value.toString().replace("'", "'\"'\"'") + "'"
+    }
+    def bamSourceArgs = bam_files.collect(quoteShell).join(' ')
 
     """
     set -euo pipefail
     export LC_ALL=C
     sample_ids=( ${sampleIds} )
-    mapfile -t bam_sources < <(
-        find bams?? -maxdepth 2 -type f -name 'filtered.bam' -print | sort
-    )
+    bam_sources=( ${bamSourceArgs} )
     if [[ \${#bam_sources[@]} -ne \${#sample_ids[@]} ]]; then
         printf 'Expected %s target BAMs; found %s\\n' \\
             "\${#sample_ids[@]}" "\${#bam_sources[@]}" \\

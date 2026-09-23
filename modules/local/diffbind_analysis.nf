@@ -5,7 +5,7 @@ process DIFFBIND_ANALYSIS {
     conda "${projectDir}/envs/diffbind.yml"
     container 'ghcr.io/evin-padhi/cutandtag-diffbind:diffbind-0.1.0'
 
-    publishDir "${params.outdir}/differential_binding/${assay_target}",
+    publishDir path: { "${params.outdir}/differential_binding/${assay_target}" },
         mode: 'copy',
         overwrite: true
 

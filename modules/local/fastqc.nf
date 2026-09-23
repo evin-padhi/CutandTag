@@ -5,7 +5,7 @@ process FASTQC {
     conda "${projectDir}/envs/fastqc.yml"
     container 'quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0'
 
-    publishDir "${params.outdir}/fastqc/${meta.sample_id}",
+    publishDir path: { "${params.outdir}/fastqc/${meta.sample_id}" },
         mode: 'copy',
         overwrite: true,
         saveAs: { filename -> filename.tokenize('/').last() }

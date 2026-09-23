@@ -5,7 +5,7 @@ process DIRECT_INPUT_METRICS {
     conda "${projectDir}/envs/python.yml"
     container 'python:3.12.3-slim-bookworm'
 
-    publishDir "${params.outdir}/demultiplex/${meta.library_id}",
+    publishDir path: { "${params.outdir}/demultiplex/${meta.library_id}" },
         mode: 'copy',
         overwrite: true,
         saveAs: { filename -> filename.tokenize('/').last() }

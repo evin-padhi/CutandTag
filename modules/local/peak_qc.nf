@@ -21,7 +21,7 @@ process PEAK_QC {
     conda "${projectDir}/envs/python.yml"
     container 'python:3.12.3-slim-bookworm'
 
-    publishDir "${params.outdir}/qc/peaks/${meta.sample_id}",
+    publishDir path: { "${params.outdir}/qc/peaks/${meta.sample_id}" },
         mode: 'copy',
         overwrite: true
 

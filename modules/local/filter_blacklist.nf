@@ -5,7 +5,7 @@ process FILTER_BLACKLIST {
     conda "${projectDir}/envs/bedtools.yml"
     container 'quay.io/biocontainers/bedtools:2.31.1--hf5e1c6e_2'
 
-    publishDir "${params.outdir}/peaks/${meta.sample_id}/broad/final",
+    publishDir path: { "${params.outdir}/peaks/${meta.sample_id}/broad/final" },
         mode: 'copy',
         overwrite: true
 

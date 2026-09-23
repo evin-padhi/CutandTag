@@ -5,7 +5,7 @@ process MERGE_DIFFERENTIAL_PEAKS {
     conda "${projectDir}/envs/bedtools.yml"
     container 'quay.io/biocontainers/bedtools:2.31.1--hf5e1c6e_2'
 
-    publishDir "${params.outdir}/differential_binding/${assay_target}",
+    publishDir path: { "${params.outdir}/differential_binding/${assay_target}" },
         mode: 'copy',
         overwrite: true,
         saveAs: { filename ->
@@ -28,6 +28,10 @@ process MERGE_DIFFERENTIAL_PEAKS {
     script:
     def sampleIds = sample_ids.join(' ')
     def conditionIds = conditions.join(' ')
+    def quoteShell = { value ->
+        "'" + value.toString().replace("'", "'\"'\"'") + "'"
+    }
+    def peakSourceArgs = peak_files.collect(quoteShell).join(' ')
     def suppliedBlacklists = blacklist_files instanceof java.util.Collection
         ? blacklist_files as List
         : blacklist_files == null ? [] : [blacklist_files]
@@ -57,9 +61,7 @@ process MERGE_DIFFERENTIAL_PEAKS {
             | tee "merge_differential_peaks.log" >&2
         exit 1
     fi
-    mapfile -t peak_sources < <(
-        find peaks?? -maxdepth 2 -type f -name 'sample_peaks.narrowPeak' -print | sort
-    )
+    peak_sources=( ${peakSourceArgs} )
     if [[ \${#peak_sources[@]} -ne \${#sample_ids[@]} ]]; then
         printf 'Expected %s target peak files; found %s\\n' \\
             "\${#sample_ids[@]}" "\${#peak_sources[@]}" \\
@@ -70,7 +72,7 @@ process MERGE_DIFFERENTIAL_PEAKS {
     condition_names=()
     for condition in "\${conditions[@]}"; do
         found=0
-        for known_condition in "\${condition_names[@]}"; do
+        for known_condition in "\${condition_names[@]-}"; do
             if [[ "\${condition}" == "\${known_condition}" ]]; then
                 found=1
                 break

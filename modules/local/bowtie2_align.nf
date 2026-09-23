@@ -5,7 +5,7 @@ process BOWTIE2_ALIGN {
     conda "${projectDir}/envs/bowtie2.yml"
     container 'quay.io/biocontainers/bowtie2:2.5.4--he20e202_2'
 
-    publishDir "${params.outdir}/alignment/${meta.sample_id}",
+    publishDir path: { "${params.outdir}/alignment/${meta.sample_id}" },
         mode: 'copy',
         overwrite: true
 

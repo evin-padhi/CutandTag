@@ -28,7 +28,7 @@ process MACS2_BROAD {
     conda "${projectDir}/envs/macs2.yml"
     container 'quay.io/biocontainers/macs2:2.2.9.1--py39hbcbf7aa_4'
 
-    publishDir "${params.outdir}/peaks/${meta.sample_id}/broad/raw",
+    publishDir path: { "${params.outdir}/peaks/${meta.sample_id}/broad/raw" },
         mode: 'copy',
         overwrite: true
 

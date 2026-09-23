@@ -5,7 +5,7 @@ process BAMCOVERAGE {
     conda "${projectDir}/envs/deeptools.yml"
     container 'quay.io/biocontainers/deeptools:3.5.5--pyhdfd78af_0'
 
-    publishDir "${params.outdir}/coverage/${meta.sample_id}",
+    publishDir path: { "${params.outdir}/coverage/${meta.sample_id}" },
         mode: 'copy',
         overwrite: true
 

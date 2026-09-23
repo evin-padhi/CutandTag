@@ -5,7 +5,7 @@ process SAMTOOLS_METRICS {
     conda "${projectDir}/envs/samtools.yml"
     container 'quay.io/biocontainers/samtools:1.20--h50ea8bc_0'
 
-    publishDir "${params.outdir}/qc/library/${meta.sample_id}",
+    publishDir path: { "${params.outdir}/qc/library/${meta.sample_id}" },
         mode: 'copy',
         overwrite: true
 

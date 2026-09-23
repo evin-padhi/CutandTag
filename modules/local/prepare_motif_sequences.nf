@@ -47,7 +47,7 @@ process PREPARE_MOTIF_SEQUENCES {
     conda "${projectDir}/envs/bedtools.yml"
     container 'quay.io/biocontainers/bedtools:2.31.1--hf5e1c6e_2'
 
-    publishDir "${params.outdir}/motifs/${meta.sample_id}/sequences",
+    publishDir path: { "${params.outdir}/motifs/${meta.sample_id}/sequences" },
         mode: 'copy',
         overwrite: true
 

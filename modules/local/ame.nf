@@ -16,7 +16,7 @@ process AME {
     conda "${projectDir}/envs/meme.yml"
     container 'quay.io/biocontainers/meme:5.5.7--pl5321h1ca524f_3'
 
-    publishDir "${params.outdir}/motifs/${meta.sample_id}",
+    publishDir path: { "${params.outdir}/motifs/${meta.sample_id}" },
         mode: 'copy',
         overwrite: true
 

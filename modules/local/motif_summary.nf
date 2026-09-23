@@ -44,7 +44,7 @@ process MOTIF_SUMMARY {
     conda "${projectDir}/envs/python.yml"
     container 'python:3.12.3-slim-bookworm'
 
-    publishDir "${params.outdir}/motifs/${meta.sample_id}/expected_motif_qc",
+    publishDir path: { "${params.outdir}/motifs/${meta.sample_id}/expected_motif_qc" },
         mode: 'copy',
         overwrite: true
 

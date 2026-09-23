@@ -28,7 +28,7 @@ process MACS2_NARROW {
     conda "${projectDir}/envs/macs2.yml"
     container 'quay.io/biocontainers/macs2:2.2.9.1--py39hbcbf7aa_4'
 
-    publishDir "${params.outdir}/peaks/${meta.sample_id}/narrow",
+    publishDir path: { "${params.outdir}/peaks/${meta.sample_id}/narrow" },
         mode: 'copy',
         overwrite: true
 
