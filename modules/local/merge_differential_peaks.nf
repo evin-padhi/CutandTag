@@ -13,8 +13,9 @@ process MERGE_DIFFERENTIAL_PEAKS {
         }
 
     input:
-    tuple val(assay_target), val(sample_ids),
-        path(peak_files, stageAs: 'peaks??/*', arity: '1..*')
+    tuple val(assay_target), val(sample_ids), val(conditions),
+        path(peak_files, stageAs: 'peaks??/*', arity: '1..*'),
+        path(blacklist_files, stageAs: 'blacklist/regions*.bed', arity: '0..1')
 
     output:
     tuple val(assay_target), val(sample_ids),
@@ -26,13 +27,38 @@ process MERGE_DIFFERENTIAL_PEAKS {
 
     script:
     def sampleIds = sample_ids.join(' ')
+    def conditionIds = conditions.join(' ')
+    def suppliedBlacklists = blacklist_files instanceof java.util.Collection
+        ? blacklist_files as List
+        : blacklist_files == null ? [] : [blacklist_files]
+    if (suppliedBlacklists.size() > 1) {
+        throw new IllegalArgumentException(
+            "MERGE_DIFFERENTIAL_PEAKS accepts at most one blacklist, got " +
+            suppliedBlacklists.size()
+        )
+    }
+    def filterBlacklist = suppliedBlacklists.size() == 1
+        ? '''
+    bedtools intersect -v -a "merged_unfiltered.bed" \\
+        -b "blacklist/regions.bed" > "consensus_peaks.bed" \\
+        2>> "merge_differential_peaks.log"
+    '''
+        : '''
+    cp "merged_unfiltered.bed" "consensus_peaks.bed"
+    '''
 
     """
     set -euo pipefail
     export LC_ALL=C
     sample_ids=( ${sampleIds} )
+    conditions=( ${conditionIds} )
+    if [[ \${#conditions[@]} -ne \${#sample_ids[@]} ]]; then
+        printf 'Sample and condition lists have different lengths\\n' \\
+            | tee "merge_differential_peaks.log" >&2
+        exit 1
+    fi
     mapfile -t peak_sources < <(
-        find peaks?? -maxdepth 2 -type f -name 'final.broadPeak' -print | sort
+        find peaks?? -maxdepth 2 -type f -name 'sample_peaks.narrowPeak' -print | sort
     )
     if [[ \${#peak_sources[@]} -ne \${#sample_ids[@]} ]]; then
         printf 'Expected %s target peak files; found %s\\n' \\
@@ -41,22 +67,46 @@ process MERGE_DIFFERENTIAL_PEAKS {
         exit 1
     fi
 
-    : > all_target_peaks.bed
-    for index in "\${!sample_ids[@]}"; do
-        awk -F '\\t' 'BEGIN { OFS = "\\t" }
-            NF >= 3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $2 < $3 {
-                print $1, $2, $3
-            }' "\${peak_sources[$index]}" >> all_target_peaks.bed
+    condition_names=()
+    for condition in "\${conditions[@]}"; do
+        found=0
+        for known_condition in "\${condition_names[@]}"; do
+            if [[ "\${condition}" == "\${known_condition}" ]]; then
+                found=1
+                break
+            fi
+        done
+        if [[ \${found} -eq 0 ]]; then condition_names+=("\${condition}"); fi
     done
-    if [[ ! -s all_target_peaks.bed ]]; then
-        printf 'No target peak intervals were called across assay %s\\n' \\
-            "${assay_target}" | tee "merge_differential_peaks.log" >&2
+    : > reproducible_condition_peaks.bed
+    condition_number=0
+    for condition in "\${condition_names[@]}"; do
+        condition_inputs=()
+        for index in "\${!conditions[@]}"; do
+            if [[ "\${conditions[$index]}" == "\${condition}" ]]; then
+                sorted_peak="condition_\${condition_number}_sample_\${index}.bed"
+                bedtools sort -i "\${peak_sources[$index]}" > "\${sorted_peak}"
+                condition_inputs+=("\${sorted_peak}")
+            fi
+        done
+        support=1
+        if [[ \${#condition_inputs[@]} -gt 1 ]]; then support=2; fi
+        bedtools multiinter -i "\${condition_inputs[@]}" \\
+            | awk -v required="\${support}" 'BEGIN { OFS = "\\t" }
+                $4 >= required { print $1, $2, $3 }' \\
+            >> reproducible_condition_peaks.bed
+        condition_number=$((condition_number + 1))
+    done 2> "merge_differential_peaks.log"
+    if [[ ! -s reproducible_condition_peaks.bed ]]; then
+        printf 'No reproducible narrow peaks were called for assay %s\\n' \\
+            "${assay_target}" | tee -a "merge_differential_peaks.log" >&2
         exit 1
     fi
 
-    bedtools sort -i all_target_peaks.bed \\
-        | bedtools merge -i - > "consensus_peaks.bed" \\
-        2> "merge_differential_peaks.log"
+    bedtools sort -i reproducible_condition_peaks.bed \\
+        | bedtools merge -i - > "merged_unfiltered.bed" \\
+        2>> "merge_differential_peaks.log"
+    ${filterBlacklist}
     if [[ ! -s consensus_peaks.bed ]]; then
         printf 'Consensus peak set is empty for assay %s\\n' \\
             "${assay_target}" | tee -a "merge_differential_peaks.log" >&2

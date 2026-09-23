@@ -93,11 +93,10 @@ checks = {
         and 'touch "sample_peaks.narrowPeak"' in narrow
         and 'touch "sample_summits.bed"' in narrow
         and 'touch "sample_peaks.xls"' in narrow,
-    "narrow calling is explicitly optional":
-        "val narrow_enabled" in narrow
-        and "when:" in narrow
-        and "narrow_enabled == true" in narrow,
-    "narrow outputs are motif-labeled peaks, summits, log, and versions":
+    "narrow calling always includes MACS2 summit calling":
+        "--call-summits" in narrow
+        and "when:" not in narrow,
+    "narrow outputs include peaks, summits, log, and versions":
         all(token in narrow for token in (
             "motif_peaks",
             "motif_summits",
@@ -155,8 +154,8 @@ checks = {
         and ".map { holder -> holder.files }" in peaks,
     "broad peaks always flow through optional blacklist finalization":
         "FILTER_BLACKLIST(MACS2_BROAD.out.peaks" in peaks,
-    "narrow calls receive the exact validated enable value":
-        "MACS2_NARROW(paired_bams, safe_genome_size, narrow_enabled)" in peaks,
+    "narrow calls always run for matched target-control BAMs":
+        "MACS2_NARROW(paired_bams, safe_genome_size)" in peaks,
     "workflow emissions distinguish raw, final, and motif-only peaks":
         all(token in peaks for token in (
             "raw_broad_peaks =",
@@ -343,8 +342,7 @@ workflow {
     PEAKS(
         analysis_bams,
         Channel.empty(),
-        Channel.value('hs'),
-        Channel.value(true)
+        Channel.value('hs')
     )
 }
 EOF
@@ -370,7 +368,7 @@ EOF
 
 [[ -f "$tmp_dir/runtime/results/peaks/TARGET/broad/raw/sample_peaks.broadPeak" ]]
 [[ -f "$tmp_dir/runtime/results/peaks/TARGET/broad/final/final.broadPeak" ]]
-[[ -f "$tmp_dir/runtime/results/peaks/TARGET/narrow_motif_qc/sample_peaks.narrowPeak" ]]
+[[ -f "$tmp_dir/runtime/results/peaks/TARGET/narrow/sample_peaks.narrowPeak" ]]
 [[ ! -s "$tmp_dir/runtime/results/peaks/TARGET/broad/raw/sample_peaks.broadPeak" ]]
 [[ ! -s "$tmp_dir/runtime/results/peaks/TARGET/broad/final/final.broadPeak" ]]
 [[ $(grep -c 'MACS2_BROAD' "$tmp_dir/runtime/trace.txt") -eq 1 ]]
@@ -399,8 +397,7 @@ workflow {
     PEAKS(
         analysis_bams,
         Channel.empty(),
-        Channel.value('1000'),
-        Channel.value(false)
+        Channel.value('1000')
     )
 }
 EOF
@@ -416,8 +413,8 @@ rm -rf "$tmp_dir/runtime/results"
 
 [[ -f "$tmp_dir/runtime/results/peaks/TARGET/broad/raw/sample_peaks.broadPeak" ]]
 [[ -f "$tmp_dir/runtime/results/peaks/TARGET/broad/final/final.broadPeak" ]]
-[[ ! -e "$tmp_dir/runtime/results/peaks/TARGET/narrow_motif_qc/sample_peaks.narrowPeak" ]]
-[[ $(wc -l < "$tmp_dir/runtime-disabled.macs.args") -eq 1 ]]
+[[ -f "$tmp_dir/runtime/results/peaks/TARGET/narrow/sample_peaks.narrowPeak" ]]
+[[ $(wc -l < "$tmp_dir/runtime-disabled.macs.args") -eq 2 ]]
 
 cat > "$tmp_dir/runtime/unmatched.nf" <<EOF
 nextflow.enable.dsl = 2
@@ -435,8 +432,7 @@ workflow {
     PEAKS(
         analysis_bams,
         Channel.empty(),
-        Channel.value('1000'),
-        Channel.value(false)
+        Channel.value('1000')
     )
 }
 EOF

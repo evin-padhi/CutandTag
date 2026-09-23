@@ -100,6 +100,7 @@ required_manifest_columns = [
     "sample_id",
     "library_id",
     "input_group",
+    "condition",
     "barcode",
     "assay_target",
     "is_control",

@@ -91,7 +91,6 @@ workflow PEAKS {
     analysis_bams
     blacklist
     macs_genome_size
-    motif_use_narrow_peaks
 
     main:
     safe_bams = analysis_bams.map { meta, bam, bai ->
@@ -140,15 +139,6 @@ workflow PEAKS {
     safe_genome_size = macs_genome_size.map { value ->
         validateMacsGenomeSize(value)
     }
-    narrow_enabled = motif_use_narrow_peaks.map { enabled ->
-        if (!(enabled instanceof Boolean)) {
-            throw new IllegalArgumentException(
-                "motif_use_narrow_peaks must be a boolean, got ${enabled}"
-            )
-        }
-        enabled
-    }
-
     /*
      * A seeded reduction turns either Channel.empty() or a one-path queue
      * into a reusable holder containing [] or [path]. FILTER_BLACKLIST can
@@ -168,7 +158,7 @@ workflow PEAKS {
         .map { holder -> holder.files }
 
     MACS2_BROAD(paired_bams, safe_genome_size)
-    MACS2_NARROW(paired_bams, safe_genome_size, narrow_enabled)
+    MACS2_NARROW(paired_bams, safe_genome_size)
     FILTER_BLACKLIST(MACS2_BROAD.out.peaks, reusable_blacklist)
 
     logs_ch = MACS2_BROAD.out.logs.mix(
@@ -186,6 +176,7 @@ workflow PEAKS {
     broad_auxiliary = MACS2_BROAD.out.auxiliary
     motif_narrow_peaks = MACS2_NARROW.out.motif_peaks
     motif_summits = MACS2_NARROW.out.motif_summits
+    differential_narrow_peaks = MACS2_NARROW.out.motif_peaks
     motif_auxiliary = MACS2_NARROW.out.auxiliary
     logs = logs_ch
     versions = versions_ch

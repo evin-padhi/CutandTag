@@ -711,9 +711,6 @@ workflow NANOCUT {
     demultiplex_i2_ch = Channel.value(validated.demultiplex_i2)
     min_mapq_ch = Channel.value(validated.min_mapq)
     macs_genome_size_ch = Channel.value(validated.macs_genome_size)
-    narrow_peaks_ch = Channel.value(
-        validated.motif_db != null && validated.motif_use_narrow_peaks
-    )
     enrichment_results_ch = Channel.empty()
     enrichment_status_ch = Channel.empty()
     enrichment_plots_ch = Channel.empty()
@@ -736,12 +733,12 @@ workflow NANOCUT {
     PEAKS(
         ALIGN_QC.out.analysis_bam,
         blacklist_ch,
-        macs_genome_size_ch,
-        narrow_peaks_ch
+        macs_genome_size_ch
     )
     DIFFERENTIAL_BINDING(
         ALIGN_QC.out.filtered_bam,
-        PEAKS.out.final_broad_peaks
+        PEAKS.out.differential_narrow_peaks,
+        blacklist_ch
     )
 
     motif_metrics_ch = Channel.empty()

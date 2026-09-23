@@ -16,6 +16,7 @@ REQUIRED_COLUMNS = (
     "sample_id",
     "library_id",
     "input_group",
+    "condition",
     "barcode",
     "assay_target",
     "is_control",
@@ -132,6 +133,7 @@ def _read_rows(
                 "sample_id": values["sample_id"],
                 "library_id": values["library_id"],
                 "input_group": values["input_group"],
+                "condition": values["condition"],
                 "barcode": values["barcode"],
                 "assay_target": assay_target,
                 "is_control": is_control,
@@ -209,6 +211,10 @@ def _validate_relationships(
         control_id = record["control_id"]
         expected_motif = record["expected_motif"]
         if is_control:
+            if record["condition"] is not None:
+                raise ManifestValidationError(
+                    f"row {row_number}: condition must be blank for controls"
+                )
             if record["assay_target"] != "IgG":
                 raise ManifestValidationError(
                     f"row {row_number}: control {sample_id!r} must have assay_target IgG"
@@ -226,6 +232,16 @@ def _validate_relationships(
         if control_id is None:
             raise ManifestValidationError(
                 f"row {row_number}: target {sample_id!r} is missing control_id"
+            )
+        condition = record["condition"]
+        if condition is None:
+            raise ManifestValidationError(
+                f"row {row_number}: target {sample_id!r} is missing condition"
+            )
+        if IDENTIFIER_PATTERN.fullmatch(str(condition)) is None:
+            raise ManifestValidationError(
+                f"row {row_number}: invalid condition {condition!r}; use only letters, "
+                "digits, dot, underscore, or dash, and begin with a letter or digit"
             )
         if expected_motif is None:
             raise ManifestValidationError(
