@@ -288,6 +288,9 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
       log_message("DiffBind contrast table rows for ", assay, " ", count_mode, ": ",
                   paste(capture.output(print(contrasts)), collapse = " | "))
     }
+    if (!"Group1" %in% names(contrasts) && "Group" %in% names(contrasts)) {
+      contrasts <- rename(contrasts, Group1 = Group)
+    }
     if (!all(c("Group1", "Group2") %in% names(contrasts))) {
       stop("DiffBind did not report condition pair names.", call. = FALSE)
     }
