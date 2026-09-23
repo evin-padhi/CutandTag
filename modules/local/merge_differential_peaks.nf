@@ -93,7 +93,7 @@ process MERGE_DIFFERENTIAL_PEAKS {
         if [[ \${#condition_inputs[@]} -gt 1 ]]; then support=2; fi
         bedtools multiinter -i "\${condition_inputs[@]}" \\
             | awk -v required="\${support}" 'BEGIN { OFS = "\\t" }
-                $4 >= required { print $1, $2, $3 }' \\
+                \$4 >= required { print \$1, \$2, \$3 }' \\
             >> reproducible_condition_peaks.bed
         condition_number=$((condition_number + 1))
     done 2> "merge_differential_peaks.log"
@@ -114,7 +114,7 @@ process MERGE_DIFFERENTIAL_PEAKS {
     fi
 
     awk 'BEGIN { OFS = "\\t"; print "GeneID", "Chr", "Start", "End", "Strand" }
-        { printf "peak_%07d\\t%s\\t%d\\t%d\\t+\\n", NR, $1, $2 + 1, $3 }' \\
+        { printf "peak_%07d\\t%s\\t%d\\t%d\\t+\\n", NR, \$1, \$2 + 1, \$3 }' \\
         consensus_peaks.bed > "consensus_peaks.saf"
 
     printf 'MERGE_DIFFERENTIAL_PEAKS:\\n  bedtools: ' \\

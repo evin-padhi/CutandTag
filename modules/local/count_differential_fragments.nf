@@ -71,10 +71,10 @@ process COUNT_DIFFERENTIAL_FRAGMENTS {
             for (i = 1; i <= sample_count; i++) printf "\\t%s", ids[i]
             printf "\\n"
         }
-        /^#/ || $1 == "Geneid" { next }
+        /^#/ || \$1 == "Geneid" { next }
         NF >= 6 + sample_count {
-            printf "%s\\t%s\\t%d\\t%d", $1, $2, $3 - 1, $4
-            for (i = 1; i <= sample_count; i++) printf "\\t%s", $(6 + i)
+            printf "%s\\t%s\\t%d\\t%d", \$1, \$2, \$3 - 1, \$4
+            for (i = 1; i <= sample_count; i++) printf "\\t%s", \$(6 + i)
             printf "\\n"
         }
     ' "featurecounts_raw.tsv" > "fragment_counts.tsv"
