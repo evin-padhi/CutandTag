@@ -452,6 +452,10 @@ def validatePipelineParameters(rawParams, launchBase, projectRoot) {
         rawParams.allow_empty,
         '--allow_empty'
     )
+    validated.demultiplex_i2 = validateBoolean(
+        rawParams.demultiplex_i2,
+        '--demultiplex_i2'
+    )
     validated.min_mapq = validateMapq(rawParams.min_mapq)
     validated.macs_genome_size = validateMacsGenomeSize(
         rawParams.macs_genome_size
@@ -703,6 +707,7 @@ workflow NANOCUT {
 
     barcode_mismatches_ch = Channel.value(validated.barcode_mismatches)
     allow_empty_ch = Channel.value(validated.allow_empty)
+    demultiplex_i2_ch = Channel.value(validated.demultiplex_i2)
     min_mapq_ch = Channel.value(validated.min_mapq)
     macs_genome_size_ch = Channel.value(validated.macs_genome_size)
     narrow_peaks_ch = Channel.value(
@@ -718,7 +723,8 @@ workflow NANOCUT {
     DEMULTIPLEX(
         manifest_ch,
         barcode_mismatches_ch,
-        allow_empty_ch
+        allow_empty_ch,
+        demultiplex_i2_ch
     )
     ALIGN_QC(
         DEMULTIPLEX.out.reads,

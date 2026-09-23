@@ -93,7 +93,8 @@ production configuration knobs.
 
 ## Manifest
 
-The CSV has one row per barcode-derived sample and this exact header:
+With the default `--demultiplex_i2 true`, the CSV has one row per
+barcode-derived sample and this exact header:
 
 ```csv
 sample_id,library_id,input_group,barcode,assay_target,is_control,control_id,expected_motif,r1,r2,i2
@@ -108,9 +109,9 @@ The columns mean:
   physical library is streamed only once.
 - `input_group`: biological input group used to require same-input matched
   controls, for example `25K`, `50K`, or `100K`.
-- `barcode`: expected I2 sequence in FASTQ orientation. All manifest barcodes
-  must be non-empty and equal length, and barcodes within a library must be
-  unique.
+- `barcode`: expected I2 sequence in FASTQ orientation. Required when
+  `--demultiplex_i2 true`; all barcodes must be non-empty and equal length,
+  and barcodes within a library must be unique. Leave blank when false.
 - `assay_target`: one of `IgG`, `CTCF`, `GATA1`, or `RUNX1`.
 - `is_control`: `true`, `1`, or `yes` for controls; `false`, `0`, or `no` for
   targets, case-insensitively.
@@ -119,9 +120,10 @@ The columns mean:
   `input_group`; it may come from another physical library.
 - `expected_motif`: regular expression matched against motif ID and alternate
   name. It is blank for controls and required for every target.
-- `r1`, `r2`, `i2`: synchronized FASTQ paths. Plain or gzip-compressed content
-  is accepted. Relative paths resolve from the manifest directory, and all
-  three paths must be identical across rows sharing a `library_id`.
+- `r1`, `r2`, `i2`: FASTQ paths. R1/R2 are required in both modes; I2 is
+  required only when `--demultiplex_i2 true`. Plain or gzip-compressed content
+  is accepted. Relative paths resolve from the manifest directory. Pooled mode
+  requires all three paths to match across rows sharing a `library_id`.
 
 Validation stops before expensive work for missing/blank required fields,
 unsupported targets, invalid identifiers/booleans, missing FASTQs, duplicate
@@ -131,6 +133,14 @@ links. R1/R2/I2 record counts and normalized read identifiers are also checked
 during streaming demultiplexing. A unique closest barcode within
 `--barcode_mismatches` is assigned; ties are ambiguous and out-of-threshold
 reads are unassigned.
+
+For FASTQs that are already split into one R1/R2 pair per sample, set
+`--demultiplex_i2 false`. Keep the same CSV columns, but leave `barcode` and
+`i2` blank. Set `r1` and `r2` to that sample's FASTQ pair. Use one unique
+`library_id` per sample in this mode. The pipeline checks the R1/R2 files,
+skips I2 demultiplexing, and sends the input pairs to FastQC and alignment.
+The demultiplex QC table marks these rows as `already_split`; it does not report
+read assignment counts for this mode.
 
 ### Exact six-library mapping
 
@@ -236,6 +246,7 @@ parameters use two.
 | `--chipseq_input` | Absent | Public ChIP-seq CSV with `reference_id,tf,peak_file`; enables peak-overlap enrichment and requires `--fasta`. |
 | `--barcode_mismatches` | `0` | Non-negative I2 Hamming-distance threshold, smaller than barcode length. |
 | `--allow_empty` | `false` | Permit a derived sample with zero assigned read pairs for diagnostic runs. |
+| `--demultiplex_i2` | `true` | Split pooled FASTQs by I2 barcode. Set `false` for sample-specific R1/R2 FASTQs. |
 | `--min_mapq` | `5` | Integer 0–255 used for the filtered BAM, coverage, and fragment QC. |
 | `--macs_genome_size` | Required | Positive effective genome size or path-safe MACS2 shortcut such as `hs`. |
 | `--macs_llocal` | Fixed `100000` | NanoScope-compatible MACS2 local lambda window; other values are rejected. |

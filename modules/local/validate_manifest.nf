@@ -11,6 +11,7 @@ process VALIDATE_MANIFEST {
 
     input:
     path manifest, stageAs: 'input_manifest.csv'
+    val demultiplex_i2
 
     output:
     path "normalized_manifest.json", emit: normalized
@@ -20,7 +21,8 @@ process VALIDATE_MANIFEST {
     """
     manifest.py validate \
         --input "input_manifest.csv" \
-        --output normalized_manifest.json
+        --output normalized_manifest.json \
+        --${demultiplex_i2 ? 'demultiplex-i2' : 'no-demultiplex-i2'}
 
     printf 'VALIDATE_MANIFEST:\\n  python: ' > validate_manifest_versions.yml
     python --version 2>&1 >> validate_manifest_versions.yml
