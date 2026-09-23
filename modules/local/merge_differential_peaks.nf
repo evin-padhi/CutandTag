@@ -15,7 +15,7 @@ process MERGE_DIFFERENTIAL_PEAKS {
     input:
     tuple val(assay_target), val(sample_ids), val(conditions),
         path(peak_files, stageAs: 'peaks??/*', arity: '1..*'),
-        path(blacklist_files, stageAs: 'blacklist/regions*.bed', arity: '0..1')
+        path(blacklist_files, stageAs: 'blacklist/regions*.bed')
 
     output:
     tuple val(assay_target), val(sample_ids),
