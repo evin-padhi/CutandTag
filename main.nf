@@ -17,6 +17,23 @@ def parameterText(rawValue, label, required = true) {
 }
 
 
+def localGitCommitId(projectDirectory) {
+    try {
+        def process = new ProcessBuilder(
+            'git', '-C', projectDirectory.toString(), 'rev-parse', 'HEAD'
+        ).redirectErrorStream(true).start()
+        def output = process.inputStream.getText('UTF-8').trim()
+        if (process.waitFor() == 0 && output ==~ /(?i)[0-9a-f]{40,64}/) {
+            return output
+        }
+    } catch (Exception error) {
+        // A workflow can run from a source archive without Git metadata.
+        log.debug "Could not read pipeline Git commit: ${error.message}"
+    }
+    'unavailable'
+}
+
+
 def resolveLocalPath(rawValue, label, launchBase) {
     def text = parameterText(rawValue, label)
     if (['*', '?', '[', ']', '{', '}'].any { marker -> text.contains(marker) }) {
@@ -698,6 +715,7 @@ PY
 
 workflow NANOCUT {
     main:
+    log.info "Pipeline Git commit: ${localGitCommitId(workflow.projectDir)}"
     validated = validatePipelineParameters(params, launchDir, projectDir)
     params.outdir = validated.outdir
 
