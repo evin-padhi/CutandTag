@@ -282,6 +282,12 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
   for (count_mode in modes) {
     dba_object <- make_dba(samples, assay, count_mode, consensus_bed, sample_peak_file)
     contrasts <- as_tibble(dba.show(dba_object, bContrasts = TRUE))
+    log_message("DiffBind contrast table columns for ", assay, " ", count_mode, ": ",
+                paste(names(contrasts), collapse = ", "))
+    if (nrow(contrasts) > 0) {
+      log_message("DiffBind contrast table rows for ", assay, " ", count_mode, ": ",
+                  paste(capture.output(print(contrasts)), collapse = " | "))
+    }
     if (!all(c("Group1", "Group2") %in% names(contrasts))) {
       stop("DiffBind did not report condition pair names.", call. = FALSE)
     }
