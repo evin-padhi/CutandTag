@@ -201,6 +201,29 @@ safe_contrast <- function(value) {
   str_replace_all(value, "[^A-Za-z0-9._-]", "_")
 }
 
+resolve_concentration_columns <- function(report, group1, group2) {
+  report_columns <- names(report)
+  candidates <- list(
+    c("Conc_group1", "Conc_group2"),
+    paste0("Conc_", c(group1, group2))
+  )
+  for (candidate in candidates) {
+    if (all(candidate %in% report_columns)) {
+      return(candidate)
+    }
+  }
+
+  prefixed_columns <- setdiff(grep("^Conc_", report_columns, value = TRUE), "Conc")
+  if (length(prefixed_columns) == 2) {
+    return(prefixed_columns)
+  }
+  stop(
+    "Could not identify DiffBind group concentration columns for ", group1, " vs ", group2,
+    ". Available report columns: ", paste(report_columns, collapse = ", "),
+    call. = FALSE
+  )
+}
+
 report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mode, bed, sample_ids, assay, fdr) {
   report <- dba.report(
     dba_object,
@@ -227,10 +250,19 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
     as.data.frame(check.names = FALSE) %>%
     as_tibble()
 
-  required_columns <- c("Chr", "Start", "End", "Conc_group1", "Conc_group2", "Fold", "p-value", "FDR")
+  concentration_columns <- resolve_concentration_columns(
+    report,
+    contrast_row$Group1,
+    contrast_row$Group2
+  )
+  required_columns <- c("Chr", "Start", "End", concentration_columns, "Fold", "p-value", "FDR")
   absent <- setdiff(required_columns, names(report))
   if (length(absent) > 0) {
-    stop("DiffBind report is missing expected fields: ", paste(absent, collapse = ", "), call. = FALSE)
+    stop(
+      "DiffBind report is missing expected fields: ", paste(absent, collapse = ", "),
+      ". Available report columns: ", paste(names(report), collapse = ", "),
+      call. = FALSE
+    )
   }
   count_columns <- intersect(sample_ids, names(count_report))
   if (length(count_columns) == 0) {
@@ -239,8 +271,8 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   report_stats <- report %>%
     transmute(
       interval_key = paste(Chr, Start, End, sep = ":"),
-      mean_group1 = as.numeric(Conc_group1),
-      mean_group2 = as.numeric(Conc_group2),
+      mean_group1 = as.numeric(.data[[concentration_columns[[1]]]]),
+      mean_group2 = as.numeric(.data[[concentration_columns[[2]]]]),
       log2_fold_change = as.numeric(Fold),
       p_value = as.numeric(`p-value`),
       adjusted_p_value = as.numeric(FDR)
