@@ -75,7 +75,7 @@ validate_bed <- function(path) {
     )
 }
 
-validate_samples <- function(path) {
+validate_samples <- function(path, assay) {
   samples <- read_tsv(
     path,
     show_col_types = FALSE,
@@ -121,8 +121,8 @@ validate_samples <- function(path) {
   insufficient <- condition_counts %>% filter(replicates < 2)
   if (nrow(insufficient) > 0) {
     stop(
-      "At least two target replicates are required in every condition. Insufficient: ",
-      assay, ": ",
+      "At least two target replicates are required in every condition for assay ", assay,
+      ". Insufficient: ",
       paste0(insufficient$condition, " (", insufficient$replicates, ")", collapse = ", "),
       call. = FALSE
     )
@@ -510,7 +510,7 @@ main <- function() {
   sink(log_file, type = "message", append = TRUE)
   on.exit(sink(type = "message"), add = TRUE)
   log_message("Validating inputs for assay ", assay)
-  samples <- validate_samples(sample_sheet)
+  samples <- validate_samples(sample_sheet, assay)
   bed <- validate_bed(consensus_bed)
   write_tsv(bed %>% select(-interval_key), file.path(outdir, "consensus_peak_ids.tsv"))
   log_message("Validated ", nrow(samples), " targets across ", n_distinct(samples$condition), " conditions and ", nrow(bed), " intervals")
