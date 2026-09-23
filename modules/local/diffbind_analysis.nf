@@ -1,6 +1,7 @@
 process DIFFBIND_ANALYSIS {
     tag "${assay_target} differential binding"
     label 'process_heavy'
+    errorStrategy 'ignore'
 
     conda "${projectDir}/envs/diffbind.yml"
     container 'ghcr.io/evin-padhi/cutandtag-diffbind:diffbind-0.1.0'
