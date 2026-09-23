@@ -45,7 +45,8 @@ Use DESeq2 for both modes. For the three-condition dataset, test all unordered p
 3. Build a DiffBind sample sheet in the task from typed inputs. Preserve sample IDs and condition labels. Do not place task-local file paths in a workflow-scope generated file.
 4. Count fragments over the fixed consensus BED in target-only and target-minus-IgG modes.
 5. Run the three pairwise DESeq2 contrasts in each mode.
-6. Combine the results and create the summary table and plots.
+6. From normalized target-only counts over the consensus peaks, calculate replicate correlations for each assay and condition.
+7. Combine the differential results and create the summary table and plots.
 
 If any target lacks its declared IgG BAM, if BAMs cannot be mapped unambiguously to manifest sample IDs, or if the consensus BED has no valid intervals, fail with a clear message before statistical testing.
 
@@ -56,6 +57,8 @@ Write outputs under `differential_binding/<assay_target>/`:
 - `diffbind_results.tsv`: one row per tested peak, contrast, and count mode. Include coordinates, both condition means, log2 fold change, raw p-value, adjusted p-value, count mode, and significance flag. Preserve the DiffBind/DESeq2 values needed to reproduce summary totals.
 - `diffbind_comparison_summary.tsv`: one row per contrast and count mode, with condition names, sample counts, tested peak count, significant peak count, counts with positive and negative log2 fold change, and FDR threshold.
 - One MA plot and one volcano plot per contrast. Each plot presents target-only and target-minus-IgG results as clearly labelled facets or panels. Do not add plot titles or subtitles. Use consistent axes and significance styling across contrasts.
+- `replicate_correlation.tsv`: one row per target-sample pair within the same assay and condition, with sample IDs, condition, number of consensus peaks used, Pearson correlation, and Spearman correlation. Calculate correlations from normalized target-only counts after a `log2(count + 1)` transformation. Do not calculate correlations from IgG-subtracted counts.
+- One correlation heatmap per assay using all target samples, with samples annotated by condition. Add scatter plots for target-sample pairs within each condition. Plot transformed normalized target-only peak counts, use equal axis scales within each scatter plot, and label only points that have an extreme contribution to the correlation.
 - A run log and software-version record for the DiffBind R package and its R/Bioconductor runtime.
 
 The current raw fragment count matrix remains available and unchanged. These new outputs provide the statistical analysis; the raw matrix remains useful for auditing counts.
@@ -67,6 +70,7 @@ The current raw fragment count matrix remains available and unchanged. These new
 - Stop with the offending assay, sample, condition, or contrast in the error message when an input is invalid.
 - If a valid contrast yields no peaks below the FDR threshold, write the results and summary row with zero significant peaks. Do not treat this as a pipeline error.
 - Report both count modes separately. Do not merge their p-values or imply that they are interchangeable estimators. Adjust p-values within each contrast and mode, as specified above.
+- Treat replicate correlations as descriptive QC. Do not use them to remove samples automatically or to claim that replicates are biologically valid. If correlation cannot be calculated because values are constant or too few values are finite, report it as unavailable with a reason.
 
 ## Scope exclusions
 
@@ -83,8 +87,10 @@ The current raw fragment count matrix remains available and unchanged. These new
 4. Results TSV contains peak coordinates, effect estimates, p-values, adjusted p-values, count mode, and contrast labels.
 5. Summary TSV reports per-contrast and per-mode test and significance counts.
 6. Every contrast has an MA plot and volcano plot that distinguish count modes.
-7. Invalid replication, control mapping, or interval inputs fail before statistical testing with actionable messages.
-8. The README documents the method, inputs, output files, interpretation, and relative-binding limitation.
+7. Replicate correlations use normalized, transformed target-only counts over the same consensus intervals used for differential testing, and include both Pearson and Spearman measures.
+8. Correlation heatmaps and within-condition scatter plots identify sample conditions and do not add titles or subtitles.
+9. Invalid replication, control mapping, or interval inputs fail before statistical testing with actionable messages.
+10. The README documents the method, inputs, output files, interpretation, replicate QC, and relative-binding limitation.
 
 ## References
 
