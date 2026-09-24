@@ -224,6 +224,46 @@ resolve_concentration_columns <- function(report, group1, group2) {
   )
 }
 
+normalize_diffbind_report_coordinates <- function(report, bed, context) {
+  expected_rows <- nrow(bed)
+  if (nrow(report) != expected_rows) {
+    stop(
+      context, " returned ", nrow(report), " report rows for ", expected_rows,
+      " consensus intervals.",
+      call. = FALSE
+    )
+  }
+  starts <- suppressWarnings(as.numeric(report$Start))
+  ends <- suppressWarnings(as.numeric(report$End))
+  if (anyNA(starts) || anyNA(ends) || any(!is.finite(starts)) || any(!is.finite(ends))) {
+    stop(context, " returned invalid interval coordinates.", call. = FALSE)
+  }
+
+  report_key <- paste(report$Chr, starts, ends, sep = ":")
+  shifted_report_key <- paste(report$Chr, starts + 1, ends, sep = ":")
+  direct_matches <- sum(report_key %in% bed$interval_key)
+  shifted_matches <- sum(shifted_report_key %in% bed$interval_key)
+  if (direct_matches == expected_rows && !anyDuplicated(report_key)) {
+    report$interval_key <- report_key
+    coordinate_mode <- "1-based report coordinates"
+  } else if (
+    shifted_matches == expected_rows && !anyDuplicated(shifted_report_key)
+  ) {
+    report$interval_key <- shifted_report_key
+    coordinate_mode <- "0-based report coordinates normalized to 1-based BED keys"
+  } else {
+    stop(
+      context, " coordinates do not match the consensus intervals: ",
+      "report rows=", nrow(report), ", consensus intervals=", expected_rows,
+      ", direct matches=", direct_matches,
+      ", start-shifted matches=", shifted_matches,
+      ". Check chromosome names and coordinate conventions.",
+      call. = FALSE
+    )
+  }
+  list(report = report, coordinate_mode = coordinate_mode)
+}
+
 report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mode, bed, sample_ids, assay, fdr) {
   report <- dba.report(
     dba_object,
@@ -237,6 +277,14 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   ) %>%
     as.data.frame(check.names = FALSE) %>%
     as_tibble()
+  normalized_report <- normalize_diffbind_report_coordinates(
+    report, bed, paste(assay, count_mode, "statistics report")
+  )
+  report <- normalized_report$report
+  log_message(
+    assay, " ", count_mode, " statistics report interval keys matched using ",
+    normalized_report$coordinate_mode
+  )
   count_report <- dba.report(
     dba_object,
     contrast = contrast_id,
@@ -249,6 +297,14 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   ) %>%
     as.data.frame(check.names = FALSE) %>%
     as_tibble()
+  normalized_counts <- normalize_diffbind_report_coordinates(
+    count_report, bed, paste(assay, count_mode, "count report")
+  )
+  count_report <- normalized_counts$report
+  log_message(
+    assay, " ", count_mode, " count report interval keys matched using ",
+    normalized_counts$coordinate_mode
+  )
 
   concentration_columns <- resolve_concentration_columns(
     report,
@@ -270,7 +326,7 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   }
   report_stats <- report %>%
     transmute(
-      interval_key = paste(Chr, Start, End, sep = ":"),
+      interval_key,
       mean_group1 = as.numeric(.data[[concentration_columns[[1]]]]),
       mean_group2 = as.numeric(.data[[concentration_columns[[2]]]]),
       log2_fold_change = as.numeric(Fold),
@@ -294,7 +350,7 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   }
   counts <- count_report %>%
     transmute(
-      interval_key = paste(Chr, Start, End, sep = ":"),
+      interval_key,
       across(all_of(count_columns))
     )
   list(results = result, counts = counts)
