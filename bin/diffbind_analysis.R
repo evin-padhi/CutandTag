@@ -433,19 +433,37 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
     ungroup()
   write_tsv(mode_correlations, file.path(outdir, "diffbind_mode_correlations.tsv"), na = "")
 
-  mode_scatter <- ggplot(
-    mode_comparison %>% filter(has_finite_pair),
-    aes(target_only, target_minus_igg)
-  ) +
-    geom_abline(slope = 1, intercept = 0, color = "grey55", linewidth = 0.35) +
-    geom_point(size = 0.7, alpha = 0.55, color = "#356A7A") +
-    facet_wrap(vars(contrast)) +
-    labs(
-      x = "Target-only log2 fold change",
-      y = "Target minus matched IgG log2 fold change"
+  mode_scatter_data <- mode_comparison %>% filter(has_finite_pair)
+  if (nrow(mode_scatter_data) > 0) {
+    mode_scatter <- ggplot(
+      mode_scatter_data,
+      aes(target_only, target_minus_igg)
     ) +
-    theme_minimal(base_size = 10) +
-    theme(panel.grid.minor = element_blank())
+      geom_abline(slope = 1, intercept = 0, color = "grey55", linewidth = 0.35) +
+      geom_point(size = 0.7, alpha = 0.55, color = "#356A7A") +
+      facet_wrap(vars(contrast)) +
+      labs(
+        x = "Target-only log2 fold change",
+        y = "Target minus matched IgG log2 fold change"
+      ) +
+      theme_minimal(base_size = 10) +
+      theme(panel.grid.minor = element_blank())
+  } else {
+    mode_scatter <- ggplot() +
+      annotate(
+        "text",
+        x = 0,
+        y = 0,
+        label = "No peaks have finite fold changes in both count modes"
+      ) +
+      coord_cartesian(xlim = c(-1, 1), ylim = c(-1, 1)) +
+      labs(
+        x = "Target-only log2 fold change",
+        y = "Target minus matched IgG log2 fold change"
+      ) +
+      theme_minimal(base_size = 10) +
+      theme(panel.grid.minor = element_blank())
+  }
   ggsave(file.path(outdir, "diffbind_mode_fold_change_correlation.pdf"), mode_scatter, width = 8, height = 5)
 
   plot_data <- results %>%
