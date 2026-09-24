@@ -226,29 +226,41 @@ resolve_concentration_columns <- function(report, group1, group2) {
 
 normalize_diffbind_report_coordinates <- function(report, bed, context) {
   expected_rows <- nrow(bed)
-  if (nrow(report) != expected_rows) {
+  if (nrow(report) > expected_rows) {
     stop(
-      context, " returned ", nrow(report), " report rows for ", expected_rows,
+      context, " returned more rows (", nrow(report), ") than the ", expected_rows,
       " consensus intervals.",
+      call. = FALSE
+    )
+  }
+  coordinate_columns <- c("Chr", "Start", "End")
+  absent <- setdiff(coordinate_columns, names(report))
+  if (length(absent) > 0) {
+    stop(
+      context, " is missing coordinate fields: ", paste(absent, collapse = ", "),
+      ". Available report columns: ", paste(names(report), collapse = ", "),
       call. = FALSE
     )
   }
   starts <- suppressWarnings(as.numeric(report$Start))
   ends <- suppressWarnings(as.numeric(report$End))
-  if (anyNA(starts) || anyNA(ends) || any(!is.finite(starts)) || any(!is.finite(ends))) {
+  if (anyNA(report$Chr) || any(!nzchar(report$Chr)) || anyNA(starts) || anyNA(ends) ||
+      any(!is.finite(starts)) || any(!is.finite(ends)) ||
+      any(starts != floor(starts)) || any(ends != floor(ends))) {
     stop(context, " returned invalid interval coordinates.", call. = FALSE)
   }
 
   report_key <- paste(report$Chr, starts, ends, sep = ":")
   shifted_report_key <- paste(report$Chr, starts + 1, ends, sep = ":")
+  if (anyDuplicated(report_key)) {
+    stop(context, " returned duplicate interval coordinates.", call. = FALSE)
+  }
   direct_matches <- sum(report_key %in% bed$interval_key)
   shifted_matches <- sum(shifted_report_key %in% bed$interval_key)
-  if (direct_matches == expected_rows && !anyDuplicated(report_key)) {
+  if (direct_matches == nrow(report)) {
     report$interval_key <- report_key
     coordinate_mode <- "1-based report coordinates"
-  } else if (
-    shifted_matches == expected_rows && !anyDuplicated(shifted_report_key)
-  ) {
+  } else if (shifted_matches == nrow(report)) {
     report$interval_key <- shifted_report_key
     coordinate_mode <- "0-based report coordinates normalized to 1-based BED keys"
   } else {
@@ -257,14 +269,58 @@ normalize_diffbind_report_coordinates <- function(report, bed, context) {
       "report rows=", nrow(report), ", consensus intervals=", expected_rows,
       ", direct matches=", direct_matches,
       ", start-shifted matches=", shifted_matches,
-      ". Check chromosome names and coordinate conventions.",
+      ". Every reported row must map to one unique consensus interval. Check chromosome names and coordinate conventions.",
       call. = FALSE
     )
   }
-  list(report = report, coordinate_mode = coordinate_mode)
+  list(
+    report = report,
+    coordinate_mode = coordinate_mode,
+    matched_rows = nrow(report),
+    omitted_rows = expected_rows - nrow(report)
+  )
 }
 
-report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mode, bed, sample_ids, assay, fdr) {
+extract_full_sample_counts <- function(binding, bed, sample_ids) {
+  binding <- as.data.frame(binding, check.names = FALSE)
+  required <- c("CHR", "START", "END", sample_ids)
+  absent <- setdiff(required, names(binding))
+  if (length(absent) > 0) {
+    stop(
+      "DiffBind full binding matrix is missing fields: ", paste(absent, collapse = ", "),
+      ". Available fields: ", paste(names(binding), collapse = ", "),
+      call. = FALSE
+    )
+  }
+  coordinates <- data.frame(
+    Chr = binding$CHR,
+    Start = binding$START,
+    End = binding$END,
+    stringsAsFactors = FALSE
+  )
+  normalized <- normalize_diffbind_report_coordinates(
+    coordinates, bed, "DiffBind full binding matrix"
+  )
+  if (normalized$omitted_rows > 0) {
+    stop(
+      "DiffBind full binding matrix has ", normalized$omitted_rows,
+      " intervals missing from the consensus set.",
+      call. = FALSE
+    )
+  }
+  counts <- as.matrix(binding[, sample_ids, drop = FALSE])
+  suppressWarnings(storage.mode(counts) <- "numeric")
+  if (anyNA(counts) || any(!is.finite(counts)) || any(counts < 0)) {
+    stop("DiffBind full binding matrix has invalid sample counts.", call. = FALSE)
+  }
+  result <- data.frame(interval_key = normalized$report$interval_key, counts, check.names = FALSE)
+  if (anyDuplicated(result$interval_key) || nrow(result) != nrow(bed)) {
+    stop("DiffBind full binding matrix does not map one-to-one to consensus intervals.", call. = FALSE)
+  }
+  result
+}
+
+report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mode, bed, assay, fdr) {
   report <- dba.report(
     dba_object,
     contrast = contrast_id,
@@ -283,29 +339,9 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   report <- normalized_report$report
   log_message(
     assay, " ", count_mode, " statistics report interval keys matched using ",
-    normalized_report$coordinate_mode
+    normalized_report$coordinate_mode, "; matched ", normalized_report$matched_rows,
+    " of ", nrow(bed), " consensus intervals"
   )
-  count_report <- dba.report(
-    dba_object,
-    contrast = contrast_id,
-    method = DBA_DESEQ2,
-    th = 1,
-    bUsePval = FALSE,
-    bCounts = TRUE,
-    bNormalized = FALSE,
-    DataType = DBA_DATA_FRAME
-  ) %>%
-    as.data.frame(check.names = FALSE) %>%
-    as_tibble()
-  normalized_counts <- normalize_diffbind_report_coordinates(
-    count_report, bed, paste(assay, count_mode, "count report")
-  )
-  count_report <- normalized_counts$report
-  log_message(
-    assay, " ", count_mode, " count report interval keys matched using ",
-    normalized_counts$coordinate_mode
-  )
-
   concentration_columns <- resolve_concentration_columns(
     report,
     contrast_row$Group1,
@@ -319,10 +355,6 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
       ". Available report columns: ", paste(names(report), collapse = ", "),
       call. = FALSE
     )
-  }
-  count_columns <- intersect(sample_ids, names(count_report))
-  if (length(count_columns) == 0) {
-    stop("DiffBind report has no per-sample counts for contrast ", contrast_id, call. = FALSE)
   }
   report_stats <- report %>%
     transmute(
@@ -348,12 +380,7 @@ report_for_contrast <- function(dba_object, contrast_id, contrast_row, count_mod
   if (nrow(result) != nrow(bed)) {
     stop("Internal error while retaining consensus intervals in contrast ", contrast_id, call. = FALSE)
   }
-  counts <- count_report %>%
-    transmute(
-      interval_key,
-      across(all_of(count_columns))
-    )
-  list(results = result, counts = counts)
+  list(results = result)
 }
 
 write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_bed) {
@@ -369,6 +396,20 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
 
   for (count_mode in modes) {
     dba_object <- make_dba(samples, assay, count_mode, consensus_bed, sample_peak_file)
+    if (count_mode == "target_only") {
+      # Contrast reports can omit intervals with no usable statistical result.
+      # Use the full library-normalized binding matrix for replicate QC instead.
+      binding <- dba.peakset(
+        dba_object,
+        bRetrieve = TRUE,
+        DataType = DBA_DATA_FRAME
+      )
+      target_counts <- extract_full_sample_counts(binding, bed, samples$sample_id)
+      log_message(
+        "Retrieved full DiffBind binding matrix for replicate QC: ",
+        nrow(target_counts), " intervals across ", length(samples$sample_id), " samples"
+      )
+    }
     contrasts <- as_tibble(dba.show(dba_object, bContrasts = TRUE))
     log_message("DiffBind contrast table columns for ", assay, " ", count_mode, ": ",
                 paste(names(contrasts), collapse = ", "))
@@ -399,7 +440,6 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
         contrast_row,
         count_mode,
         bed,
-        samples$sample_id,
         assay,
         fdr
       )
@@ -411,9 +451,6 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
           mean_group1, mean_group2, log2_fold_change, p_value,
           adjusted_p_value, fdr_threshold, significant
         )
-      if (count_mode == "target_only") {
-        target_counts[[length(target_counts) + 1]] <- extracted$counts
-      }
       summary_rows[[length(summary_rows) + 1]] <- result %>%
         summarise(
           condition1 = first(condition1),
@@ -422,7 +459,8 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
           count_mode = first(count_mode),
           sample_count1 = sum(samples$condition == first(condition1)),
           sample_count2 = sum(samples$condition == first(condition2)),
-          tested_peaks = n(),
+          tested_peaks = sum(is.finite(p_value) & is.finite(adjusted_p_value)),
+          untested_peaks = sum(!is.finite(p_value) | !is.finite(adjusted_p_value)),
           significant_peaks = sum(significant),
           positive_log2_fold_change = sum(significant & log2_fold_change > 0, na.rm = TRUE),
           negative_log2_fold_change = sum(significant & log2_fold_change < 0, na.rm = TRUE),
@@ -556,37 +594,28 @@ write_diffbind_results <- function(samples, bed, assay, fdr, outdir, consensus_b
   }
   list(
     results = results,
-    target_counts = bind_rows(target_counts),
+    target_counts = target_counts,
     summary = summaries,
     mode_correlations = mode_correlations
   )
 }
 
 write_replicate_qc <- function(samples, bed, target_counts, outdir) {
-  raw_counts <- target_counts %>%
+  count_long <- target_counts %>%
     pivot_longer(cols = all_of(samples$sample_id), names_to = "sample_id", values_to = "normalized_count") %>%
     filter(!is.na(normalized_count)) %>%
-    distinct(interval_key, sample_id, .keep_all = TRUE)
-  count_wide <- raw_counts %>%
-    select(interval_key, sample_id, normalized_count) %>%
-    pivot_wider(names_from = sample_id, values_from = normalized_count, values_fill = 0) %>%
-    arrange(interval_key)
-  raw_matrix <- count_wide %>% select(all_of(samples$sample_id)) %>% as.matrix()
-  storage.mode(raw_matrix) <- "numeric"
-  if (!any(raw_matrix > 0)) {
-    stop("Target-only consensus-peak counts are all zero; replicate correlations cannot be computed.", call. = FALSE)
+    mutate(
+      normalized_count = as.numeric(normalized_count),
+      log2_count = log2(pmax(normalized_count, 0) + 1)
+    )
+  expected_count_rows <- nrow(bed) * nrow(samples)
+  if (nrow(count_long) != expected_count_rows) {
+    stop(
+      "Full DiffBind binding matrix produced ", nrow(count_long),
+      " sample-interval counts; expected ", expected_count_rows, ".",
+      call. = FALSE
+    )
   }
-  size_factors <- estimateSizeFactorsForMatrix(raw_matrix, type = "poscounts")
-  normalized_matrix <- sweep(raw_matrix, 2, size_factors, "/")
-  count_long <- as_tibble(normalized_matrix, .name_repair = "minimal") %>%
-    set_names(samples$sample_id) %>%
-    mutate(interval_key = count_wide$interval_key, .before = 1) %>%
-    pivot_longer(
-      cols = all_of(samples$sample_id),
-      names_to = "sample_id",
-      values_to = "normalized_count"
-    ) %>%
-    mutate(log2_count = log2(pmax(as.numeric(normalized_count), 0) + 1))
   peak_index <- bed %>% select(peak_id, interval_key)
   count_long <- count_long %>% left_join(peak_index, by = "interval_key")
   pairs <- samples %>%
