@@ -508,7 +508,7 @@ custom_dir = Path("multiqc_custom_content")
 
 def read_table(path):
     with open(path, encoding="utf-8", newline="") as handle:
-        return list(csv.DictReader(handle, delimiter="\t"))
+        return list(csv.DictReader(handle, delimiter="\\t"))
 
 
 def write_table(path, columns, rows):
@@ -516,7 +516,7 @@ def write_table(path, columns, rows):
         writer = csv.DictWriter(
             handle,
             fieldnames=columns,
-            delimiter="\t",
+            delimiter="\\t",
             extrasaction="ignore",
         )
         writer.writeheader()
@@ -539,17 +539,17 @@ def combine_tables(pattern, identity):
 
 
 def append_yaml_sections(handle, sections):
-    handle.write("custom_data:\n")
+    handle.write("custom_data:\\n")
     for key, metadata in sections:
-        handle.write(f"  {key}:\n")
+        handle.write(f"  {key}:\\n")
         for field, value in metadata.items():
             escaped = value.replace('"', '\\"')
-            handle.write(f'    {field}: "{escaped}"\n')
-    handle.write("sp:\n")
+            handle.write(f'    {field}: "{escaped}"\\n')
+    handle.write("sp:\\n")
     for key, metadata in sections:
-        handle.write(f"  {key}:\n")
-        handle.write(f'    fn: "{metadata["filename"]}"\n')
-    handle.write("ignore_images: false\n")
+        handle.write(f"  {key}:\\n")
+        handle.write(f'    fn: "{metadata["filename"]}"\\n')
+    handle.write("ignore_images: false\\n")
 
 
 demux_columns = [
@@ -842,27 +842,27 @@ if enrichment_rows:
         "w",
         encoding="utf-8",
     ) as handle:
-        handle.write('id: "nanocut_peak_enrichment_overview"\n')
-        handle.write('section_name: "Nano-CUT&Tag peak enrichment"\n')
-        handle.write('description: "Peak-overlap enrichment against four null models."\n')
-        handle.write("---\n")
+        handle.write('id: "nanocut_peak_enrichment_overview"\\n')
+        handle.write('section_name: "Nano-CUT&Tag peak enrichment"\\n')
+        handle.write('description: "Peak-overlap enrichment against four null models."\\n')
+        handle.write("---\\n")
         handle.write(
             "Peak enrichment is reported in "
             "[`peak_enrichment.tsv`](../summary/peak_enrichment.tsv) "
-            "with one row per foreground/reference/null-model comparison.\n\n"
+            "with one row per foreground/reference/null-model comparison.\\n\\n"
         )
         handle.write(
-            "Null models and heatmaps:\n"
+            "Null models and heatmaps:\\n"
         )
         for model, description, heatmap_png, matrix_tsv, heatmap_asset in heatmap_models:
             handle.write(
                 f"- `{model}` — {description} "
                 f"[heatmap]({heatmap_png}), "
-                f"[matrix](../summary/{matrix_tsv})\n"
+                f"[matrix](../summary/{matrix_tsv})\\n"
             )
         handle.write(
-            "\nThe observed/null overview plot is available as "
-            "[`observed_vs_null.png`](observed_vs_null.png).\n"
+            "\\nThe observed/null overview plot is available as "
+            "[`observed_vs_null.png`](observed_vs_null.png).\\n"
         )
 
 config_sections = [
