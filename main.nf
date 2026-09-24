@@ -932,6 +932,7 @@ workflow NANOCUT {
     filtered_bams = ALIGN_QC.out.filtered_bam
     library_metrics = ALIGN_QC.out.metrics
     coverage = ALIGN_QC.out.coverage
+    igg_subtracted_coverage = ALIGN_QC.out.igg_subtracted_coverage
     final_broad_peaks = PEAKS.out.final_broad_peaks
     differential_consensus_peaks = DIFFERENTIAL_BINDING.out.consensus_peaks
     differential_fragment_counts = DIFFERENTIAL_BINDING.out.fragment_counts

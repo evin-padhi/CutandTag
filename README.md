@@ -283,6 +283,8 @@ results/
   fastqc/<sample_id>/
   alignment/<sample_id>/
   coverage/<sample_id>/
+  coverage/igg_subtracted/<target_sample_id>/
+    <target_sample_id>.RPKM_minus_IgG.bw
   peaks/<sample_id>/broad/raw/
   peaks/<sample_id>/broad/final/
   peaks/<sample_id>/narrow/
@@ -365,7 +367,11 @@ results/
   library duplicate metrics before differential testing.
 - `coverage/` contains RPKM `coverage.RPKM.bw` files generated with MAPQ
   filtering, 50-bp bins, centered/extended reads, 250-bp smoothing, and
-  duplicate ignoring.
+  duplicate ignoring. `coverage/igg_subtracted/<sample_id>/` contains one
+  target-minus-matched-IgG bigWig for each non-control sample. It subtracts
+  the matched sample's RPKM track from the target's RPKM track in 50-bp bins;
+  negative values are retained. These tracks support visualization and are
+  separate from the differential-binding statistics.
 - `peaks/` retains the matched-IgG raw broadPeak/gappedPeak/XLS/log, the
   blacklist-filtered `final.broadPeak`, plus matched-IgG narrowPeak and summit
   files for every target sample. NarrowPeak calls support differential peak
