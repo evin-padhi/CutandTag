@@ -635,6 +635,8 @@ process WRITE_COMPLETION_SUMMARY {
     input:
     path multiqc_report, stageAs: 'report/multiqc_report.html'
     path combined_summary, stageAs: 'report/combined_target_qc.tsv'
+    path qc_dashboard, stageAs: 'report/qc_dashboard.html'
+    path qc_summary, stageAs: 'report/qc_summary.tsv'
     path enrichment_files, stageAs: 'enrichment??/*'
     path software_versions, stageAs: 'pipeline/software_versions.yml'
     path validated_parameters, stageAs: 'pipeline/validated_parameters.json'
@@ -660,6 +662,10 @@ with open(
     targets = list(csv.DictReader(handle, delimiter="\\t"))
 if not Path("report/multiqc_report.html").stat().st_size:
     raise SystemExit("MultiQC report is empty")
+if not Path("report/qc_dashboard.html").stat().st_size:
+    raise SystemExit("QC dashboard is empty")
+if not Path("report/qc_summary.tsv").stat().st_size:
+    raise SystemExit("QC summary is empty")
 if not Path("pipeline/software_versions.yml").stat().st_size:
     raise SystemExit("software version manifest is empty")
 enrichment_tables = sorted(Path().glob("enrichment*/*"))
@@ -679,6 +685,8 @@ with open("run_summary.txt", "w", encoding="utf-8") as output:
     output.write(f"motif_enabled\\t{str(bool(parameters['motif_db'])).lower()}\\n")
     output.write("report\\treports/multiqc/multiqc_report.html\\n")
     output.write("target_summary\\treports/summary/combined_target_qc.tsv\\n")
+    output.write("qc_dashboard\\treports/qc_dashboard/qc_dashboard.html\\n")
+    output.write("qc_summary\\treports/qc_dashboard/qc_summary.tsv\\n")
     if peak_enrichment_tables:
         required_plots = [
             "observed_vs_null.png",
@@ -761,6 +769,8 @@ workflow NANOCUT {
 
     motif_metrics_ch = Channel.empty()
     motif_versions_ch = Channel.empty()
+    motif_ame_results_ch = Channel.empty()
+    motif_ame_statuses_ch = Channel.empty()
     if (validated.motif_db != null) {
         motif_fasta_ch = Channel.fromPath(
             validated.fasta,
@@ -785,6 +795,10 @@ workflow NANOCUT {
             motif_use_narrow_peaks_ch
         )
         motif_metrics_ch = MOTIFS.out.motif_metrics
+        motif_ame_results_ch = MOTIFS.out.known_motifs
+        motif_ame_statuses_ch = MOTIFS.out.statuses
+            .filter { meta, stage, status -> stage == 'ame' }
+            .map { meta, stage, status -> tuple(meta, status) }
         motif_versions_ch = MOTIFS.out.versions
     }
 
@@ -863,7 +877,9 @@ workflow NANOCUT {
         motif_metrics_ch,
         enrichment_dashboard_files_ch,
         gtf_ch,
-        tss_bed_ch
+        tss_bed_ch,
+        motif_ame_results_ch,
+        motif_ame_statuses_ch
     )
 
     parameter_map = new LinkedHashMap(validated)
@@ -895,6 +911,8 @@ workflow NANOCUT {
     WRITE_COMPLETION_SUMMARY(
         QC.out.multiqc_report,
         QC.out.combined_summary,
+        QC.out.qc_dashboard_report,
+        QC.out.qc_summary_tsv,
         completion_summary_enrichment,
         COLLECT_VERSIONS.out.versions,
         WRITE_PIPELINE_PARAMETERS.out.parameters
@@ -930,6 +948,11 @@ workflow NANOCUT {
     target_qc = QC.out.target_qc
     combined_summary = QC.out.combined_summary
     multiqc_report = QC.out.multiqc_report
+    qc_dashboard_report = QC.out.qc_dashboard_report
+    qc_summary_tsv = QC.out.qc_summary_tsv
+    qc_summary_json = QC.out.qc_summary_json
+    top_motifs = QC.out.top_motifs
+    qc_tss_profiles = QC.out.qc_tss_profiles
     metrics = all_metrics_ch
     versions = COLLECT_VERSIONS.out.versions
     completion_summary = WRITE_COMPLETION_SUMMARY.out.summary

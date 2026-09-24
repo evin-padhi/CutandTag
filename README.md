@@ -383,6 +383,12 @@ results/
 - `reports/multiqc/multiqc_report.html` is the top-level report.
   `reports/summary/combined_target_qc.tsv` is the combined target broad-peak
   summary.
+- `reports/qc_dashboard/qc_dashboard.html` is the standalone historical QC
+  dashboard. It summarizes demultiplexing status, library and insert-size QC,
+  peak widths and fragment-based FRiP, optional TSS enrichment, and motif QC.
+  Its companion `qc_summary.tsv`, `qc_summary.json`, `top_motifs.tsv`, and
+  `tss_profiles.tsv` files remain available beside it. MultiQC remains a
+  separate report at `reports/multiqc/multiqc_report.html`.
 - `pipeline_info/` contains the normalized manifest, validated parameter JSON,
   software versions, completion summary, built index when applicable,
   execution report, timeline, trace, and DAG.

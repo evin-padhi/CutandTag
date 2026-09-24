@@ -32,6 +32,7 @@ process TSS_ENRICHMENT {
         path("*.tss_matrix.gz"),
         path("*.tss_matrix.tsv"),
         path("*.tss_profile.png"),
+        path("*.tss_profile.tsv"),
         path("*.tss_status.tsv"),
         emit: profiles
     tuple val(meta), path("tss_enrichment_versions.yml"), emit: versions
@@ -113,6 +114,7 @@ process TSS_ENRICHMENT {
     plotProfile \
         --matrixFile "${outputStem}.tss_matrix.gz" \
         --outFileName "${outputStem}.tss_profile.png" \
+        --outFileNameData "${outputStem}.tss_profile.tsv" \
         --plotTitle "TSS enrichment"
 
     printf 'sample_id\\tannotation_mode\\tstatus\\n' \
